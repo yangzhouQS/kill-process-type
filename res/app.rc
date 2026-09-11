@@ -1,0 +1,8 @@
+/* app.rc - 资源脚本（纯 ASCII，避免 windres 编码问题）
+ * 101 = IDI_APP（与 src/resource.h 保持一致）
+ * 1   = RT_MANIFEST 清单
+ * 注意：清单内容不要包含 <compatibility>/<supportedOS> 段，
+ * 本机 SxS 加载器会拒绝该段并报 side-by-side 错误（已实测）。
+ */
+101 ICON "app.ico"
+1 24 "manifest.xml"

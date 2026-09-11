@@ -1,0 +1,11 @@
+# build artifacts
+build/
+*.o
+*.obj
+*.exe
+
+# runtime config (generated beside exe or in %APPDATA%)
+*.ini
+
+# test artifacts
+tests/*.png

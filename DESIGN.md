@@ -1,0 +1,209 @@
+# kill-process-type 设计文档
+
+> 版本：v4.0（2026-09-11，移植 memreduct：配置系统/设置窗口/深色主题/自启增强）
+> 配套开发指南见 [AGENTS.md](AGENTS.md)
+
+轻量级 Windows 小工具：查看并终止 Node.js / Python 进程、浏览全部系统进程、
+查看端口占用与 winnat 保留区间（EACCES 诊断）、**AI 杀进程风险评估（kilo）**、
+**无头 CLI 供 AI 工具链反向调用**，托盘常驻、支持开机自启。
+
+## 1. 目标与约束
+
+| 项 | 说明 |
+|---|---|
+| 语言 | C（C17），纯 Win32 SDK，零第三方依赖 |
+| 产物 | 单文件 `kill-process-type.exe`，约 100KB，`-static` 无运行库 |
+| 权限 | 普通用户即可；高权限进程终止失败时逐条给出原因 |
+| 兼容 | Windows 7+（64 位编译） |
+
+## 2. 技术选型
+
+- **GUI**：`CreateWindowExW` 原生窗口 + ComCtl32 v6（ListView / Tab / StatusBar），
+  manifest 启用视觉样式与 PerMonitorV2 DPI。
+- **进程枚举**：`CreateToolhelp32Snapshot`；路径 `QueryFullProcessImageNameW`；
+  内存 `GetProcessMemoryInfo`。
+- **进程终止**：`OpenProcess(PROCESS_TERMINATE)` + `TerminateProcess`。
+- **端口扫描**：`GetExtendedTcpTable / GetExtendedUdpTable`（双栈，见 net.c）。
+- **进程图标**：`SHGetFileInfoW(SHGFI_SYSICONINDEX)` 挂接系统图像列表，
+  与任务管理器一致、零额外内存。
+- **托盘**：`Shell_NotifyIconW` + 运行时 `AppendMenuW` 菜单。
+- **编译**：MinGW-w64 gcc（本机 8.1）+ windres（Strawberry 2.42，见踩坑记录）。
+
+## 3. 架构与模块划分
+
+```
+src/
+├── main.c        入口：单实例互斥、InitCommonControls、/tray 参数、消息循环
+├── app.h         全局 App g_app（句柄/模式/缓存）+ ListMode 枚举 + PortRow
+├── gui.c/.h      窗口外壳：控件创建、布局、字体、页签、消息路由
+├── views.c/.h    视图渲染：列定义、筛选、快照→行、勾选保持、状态栏统计
+├── actions.c/.h  用户动作：终止进程、复制路径、列表右键菜单
+├── process.c/.h  进程枚举（node/python 识别、全进程）与终止
+├── net.c/.h      端口监听扫描（TCP/UDP × IPv4/IPv6）+ 系统保留区间
+├── ai.c/.h       AI 风险评估：无头调用 kilo run（管道捕获 + 线程 + 超时）
+├── cli.c/.h      无头 CLI（/list /ports /kill，UTF-8 JSON 输出）
+├── tray.c/.h     托盘图标/菜单/气泡
+├── startup.c/.h  开机自启动（HKCU Run）
+├── common.h      UNICODE/_WIN32_WINNT/PSAPI_VERSION 等统一编译环境
+└── resource.h    资源与命令 ID
+```
+
+依赖方向：`gui → views/actions → process/net → common`；
+`app.h` 为共享状态唯一定义点，禁止跨模块 static 副本。
+
+## 4. UI 设计
+
+```
++------------------------------------------------------------------+
+| [刷新] [杀死选中] [杀死全部Node] [杀死全部Python]  [✓自动刷新(10s)] |
++------------------------------------------------------------------+
+| [全部进程][Node/Python][端口占用]          [筛选进程名，如：node]   |
++------------------------------------------------------------------+
+| □ | 图标 进程名        | PID   | 父PID | 内存    | 类型   | 路径   |
+| □ | 🐍 python.exe      | 12346 | 900   | 24.1MB | Python | D:\... |
+|   | ...                                                            |
++------------------------------------------------------------------+
+| Node.js: 2 个    Python: 1 个    上次刷新 21:35:07                |
++------------------------------------------------------------------+
+```
+
+- **页签**（WC_TABCONTROL，左侧）：三个视图共用一套 ListView，切换即换列头
+  与数据源；筛选框右对齐同一行（任务管理器式布局）。
+- **全部进程**：系统全量进程（`ScanAllProcesses`），类型列标注 Node.js /
+  Python / —，同样支持筛选、勾选终止、右键复制路径。
+- **Node/Python**：仅目标类型（核心场景）。
+- **端口占用**：端口/协议/PID/进程名/类型/内存/路径，与全进程快照 Join，
+  进程已退出显示占位符。
+- **系统保留端口区间（EACCES 诊断）**：端口视图追加 winnat / Hyper-V 动态
+  保留与管理员保留区间行（`netsh excludedportrange` 四路解析，无控制台闪窗，
+  无需管理员）。此类端口 `listen` 报 `EACCES` 且**没有进程可杀**：
+  - 行显示 `8777-8876 TCP (系统保留端口区间)`，筛选端口命中区间即显示；
+  - 右键该行可**一键修复**：工具内 `ShellExecuteExW(runas)` 拉起提权 cmd
+    自动执行 `net stop/start winnat` → `netsh add excludedportrange
+    store=persistent`（固定目标端口）→ 验证输出，仅一次 UAC 确认，全程免复制；
+    目标端口取筛选框中落在区间内的值，否则用区间起始端口；
+  - 右键另提供**仅复制修复命令**（无 UAC 场景的备用路径）；
+  - 误对保留行"杀死选中"时弹窗解释原因，可直接选择"是"进入一键修复；
+  - 排序分层：正常监听 < 保留区间 < 已退出进程。
+- **筛选**：进程模式为名称子串（不区分大小写）；端口模式支持
+  `3000`、`80,443`、`3000-3010` 组合；输入即筛选（仅重绘不重扫）。
+- **列排序**：点击列头即按该列排序（单列生效），再点同列切换升/降序，
+  表头显示 ▲/▼ 箭头；排序在自动刷新后保持；切换页签时重置（列集不同）。
+  端口视图中"进程已退出"行恒排最后，不受方向影响；同键以 PID 兜底保证
+  排序结果确定。
+- **勾选保持**：自动刷新按 PID 保存/回放勾选，不会因列表重建丢失。
+- **行右键**：「复制可执行路径」（多选行以 CRLF 连接；路径不可读时回退进程名），
+  支持 Shift+F10 键盘触发。
+- 关闭(X) → 隐藏到托盘（气泡提示一次）；10s 自动刷新仅可见时执行。
+
+### 托盘
+
+左键单击切换主窗口显隐；右键菜单：
+
+```
+刷新进程列表
+杀死全部 Node.js
+杀死全部 Python
+────────────────
+☑ 开机自启动        （HKCU Run，值 = "exe路径" /tray）
+显示 / 隐藏主界面
+退出
+```
+
+杀进程后气泡反馈结果；批量操作前二次确认。
+
+## 5. 关键实现要点
+
+1. 全 Unicode（`-municode` + W 系列 API）；DPI 缩放统一 `AppScale()`
+   （`WM_DPICHANGED` 时更新字体与布局）。
+2. 单实例：`CreateMutexW(Local\\kill-process-type-single)`，二次启动激活已有窗口。
+3. `/tray` 参数：登录自启后静默驻留托盘（气泡提示一次）。
+4. 端口视图按 PID 去重终止（同一进程多端口占多行）。
+5. 剪贴板：`CF_UNICODETEXT`，成功后内存归剪贴板，失败路径 `GlobalFree`。
+6. 列排序在数据层完成（`qsort` 缓存数组后重建行），而非 `ListView_SortItems`，
+   便于刷新后保持顺序；箭头通过 `HDITEM.fmt` 的 `HDF_SORTUP/HDF_SORTDOWN`。
+
+## 6. 构建与测试
+
+```bat
+build.bat          :: 首选；构建前退出运行中的实例
+mingw32-make       :: 备选
+mingw32-make test  :: process/net/startup 模块测试（注册表零残留）
+powershell -NoProfile -ExecutionPolicy Bypass -File tests\ui-flow-test.ps1
+                   :: UI 自动化（右键复制 + 页签切换，走应用内消息路径）
+```
+
+UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\clipread.c`。
+
+## 7. 踩坑记录（实测结论，写入 AGENTS.md 硬性约定）
+
+1. manifest 含 `<compatibility>/<supportedOS>` 段 → SxS 启动失败（windres
+   2.30/2.42 均复现），已移除。
+2. `WIN32_LEAN_AND_MEAN` 排除 `shellapi.h`，托盘 API 需显式包含。
+3. `.bat`/`.ps1` 中文注释在 GBK 码页下解析错乱，必须纯 ASCII + CRLF。
+4. windres 内嵌中文资源有编码风险：中文 UI 一律 C 源码运行时构建。
+5. **跨进程 SendMessage 传指针的 LVM_* 消息（如 LVM_SETITEMSTATE+LVITEM）会
+   使 comctl32 访问冲突崩溃**（本机 Win11 22621 复现）；UI 自动化须走
+   PostMessage(WM_CONTEXTMENU/WM_COMMAND) 等无指针路径。
+6. 本机 PowerShell OLE 剪贴板偶发被锁（Get/Set-Clipboard 抛异常），剪贴板
+   断言用独立进程 `clipread.exe`。
+7. 本环境 UIA 对该 ListView 只暴露 Pane（读不到行）；自动化读行文本用
+   MSAA（oleacc `AccessibleObjectFromWindow`，子项 1 起 `accName(i)`）。
+
+## 8. 更新日志
+
+- **v4.0（2026-09-11）**：移植 memreduct 三大功能——
+  **配置系统**（config.c：INI 持久化，exe 目录便携优先/%APPDATA% 回退，
+  键含 AutoRefresh/Interval/StartMinimized/Theme/BalloonNotify/窗口位置）；
+  **设置窗口**（settings.c：自启/启动最小化/主题三态/自动刷新间隔/气泡开关，
+  改动实时生效，托盘菜单"设置..."入口）；
+  **深色主题**（theme.c：跟随系统 AppsUseLightTheme + 手动浅/深三态热切换、
+  DWM 沉浸式标题栏、ListView/表头/状态栏/Tab/按钮全面深色化、
+  WM_SETTINGCHANGE 系统切换热响应；浅色模式零侵入）；
+  **主题变更全局广播**：设置窗口切换或系统自动切换时，主窗口/设置窗口/
+  AI 评估窗口三方联动实时重应用；
+  **多屏 DPI 健壮性**：设置窗口独立 DPI 缩放 + WM_DPICHANGED 重排、
+  弹窗锚定主窗口位置（避免 CW_USEDEFAULT 漂移到异 DPI 屏幕）；
+  动态窗口按钮保持系统样式（动态窗口场景 ownerdraw 实测不生效）。
+  **自启增强**（启动时最小化静默驻留，区别于 /tray 带气泡）；
+  主窗口位置记忆。踩坑：DOUBLEBUFFER 下 LVM_GETBKCOLOR 不可信（改用
+  GETTEXTCOLOR/像素断言）；表头深色须 NM_CUSTOMDRAW 全自绘。
+- **v3.3（2026-09-11）**：AI 评估窗口等待计时——分析中状态栏每秒刷新
+  「已等待 X 秒/X 分 X 秒」，完成/失败后显示总用时；修复非端口视图下
+  PID=0 行（[System Process]）被误判为保留区间行的问题。
+- **v3.2（2026-09-11）**：AI 评估窗口三段式展示（提示词/思考过程/分析结果）——
+  kilo 改用 `--format json --thinking` 事件流（reasoning/text 分离解析，含
+  \uXXXX 与代理对反转义、非事件输出兜底）；结果窗口换 Rich Edit
+  （RICHEDIT50W），自研 Markdown 子集→RTF 渲染（加粗/行内代码/标题/列表/
+  颜色，GBK 字节 + \fcharset134，非 GBK 字符 \uN 回退）；失败诊断以红色段
+  展示。踩坑：RTF 字体必须声明 \fcharset134，否则中文字节按 CP1252 解码
+  呈现乱码。
+- **v3.1（2026-09-11）**：kilo 调用健壮性——3 次退避重试（3/8/15s，
+  应对 kilo 偶发退出码 3 的间歇性故障）、stderr 重定向临时文件用于失败诊断
+  （对话框直接展示 kilo 退出码与错误输出）、子进程固定 USERPROFILE 工作目录、
+  诊断工具 tests/test_ai_spawn.c。
+- **v3.0（2026-09-11）**：与 kilo CLI 双向打通——
+  **A. 工具→AI**：任意进程行右键「AI 风险评估（kilo）」，无头调用
+  `kilo run`（kilo 横幅/日志走 stderr，stdout 仅答案），工作线程 + 管道捕获
+  + 5 分钟超时看护；结果窗口展示分析（进程身份/风险评级/依据/建议）并支持
+  一键终止。kilo 路径回退链：`KILO_EXE` 环境变量 → 本仓库发行包 →
+  D:\kilo 安装位置 → PATH。实测端到端约 40~90 秒。
+  **B. AI→工具**：新增无头 CLI `/list` `/ports` `/kill`（UTF-8 JSON 到
+  stdout，cmd 管道可靠捕获；PowerShell 直调 GUI 子系统 exe 不可靠），
+  并注册 kilo 技能 `process-kill`（全局 skills 目录），AI 助手可对话式
+  管控进程、诊断 EACCES。
+- **v2.3（2026-09-11）**：保留端口一键提权修复（UAC + 提权 cmd 自动执行，
+  工具内闭环，免手动复制命令）；"杀死"保留行弹窗可直接选择进入修复。
+- **v2.2（2026-09-11）**：端口视图新增系统保留区间诊断（netsh 解析、右键
+  复制修复命令、误杀提示），定位 winnat 保留导致的 listen EACCES。
+- **v2.1（2026-09-11）**：列头点击排序（单列生效、升降切换、表头箭头、
+  刷新保持、切页签重置；端口视图已退出进程恒排最后）。
+- **v2.0（2026-09-10）**：新增「全部进程」页签（Tab 控件替换原单选按钮）；
+  模块化重构（app.h / views.c / actions.c 从 gui.c 拆出）；新增 AGENTS.md；
+  UI 自动化测试改为应用内消息路径（ui-flow-test.ps1）。
+- v1.2（2026-09-10）：列表行右键复制可执行路径（多选 CRLF 连接、路径缺失回
+  退进程名、支持键盘触发）。
+- v1.1（2026-09-05）：开机自启动（托盘开关 + HKCU Run + /tray 静默启动）；
+  进程图标（系统图像列表，与任务管理器一致）。
+- v1.0（2026-09-05）：初版：Node/Python 枚举与终止、托盘、端口占用视图、
+  筛选、自动刷新、单实例。
