@@ -2612,24 +2612,16 @@ static WCHAR s_lastUserMsg[CHAT_TURN_MAX];
 
 static void ChatLayout(HWND parent)
 {
+    (void)parent;
     if (!s_chatPanel)
         return;
     {
-        RECT rc;
-        int pw = 360;
-        GetClientRect(parent, &rc);
-        MoveWindow(s_chatPanel, rc.right - pw, 0, pw, rc.bottom, TRUE);
-        /* 确保始终在所有兄弟控件之上（列表/按钮/页签等） */
-        SetWindowPos(s_chatPanel, HWND_TOP, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        {
-            RECT prc;
-            GetClientRect(s_chatPanel, &prc);
-            MoveWindow(s_chatDisplay, 4, 4, prc.right - 8, prc.bottom - 100, TRUE);
-            MoveWindow(s_chatInput, 4, prc.bottom - 88, prc.right - 8 - 76, 84, TRUE);
-            MoveWindow(s_chatSend, prc.right - 68, prc.bottom - 88, 64, 40, TRUE);
-            MoveWindow(s_chatClear, prc.right - 68, prc.bottom - 44, 64, 40, TRUE);
-        }
+        RECT prc;
+        GetClientRect(s_chatPanel, &prc);
+        MoveWindow(s_chatDisplay, 4, 4, prc.right - 8, prc.bottom - 100, TRUE);
+        MoveWindow(s_chatInput, 4, prc.bottom - 88, prc.right - 8 - 76, 84, TRUE);
+        MoveWindow(s_chatSend, prc.right - 68, prc.bottom - 88, 64, 40, TRUE);
+        MoveWindow(s_chatClear, prc.right - 68, prc.bottom - 44, 64, 40, TRUE);
     }
 }
 
@@ -2637,10 +2629,7 @@ static LRESULT CALLBACK ChatProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_SIZE:
-        ChatLayout(GetParent(hwnd));
-        /* 主窗口 Layout 可能盖住面板，再次置顶 */
-        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        ChatLayout(hwnd);
         return 0;
     case WM_ERASEBKGND:
         if (ThemeOnEraseBkgnd(hwnd, (HDC)wp))
@@ -2657,7 +2646,14 @@ static LRESULT CALLBACK ChatProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_CLOSE:
-        ShowWindow(hwnd, SW_HIDE);
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        s_chatPanel = NULL;
+        s_chatDisplay = NULL;
+        s_chatInput = NULL;
+        s_chatSend = NULL;
+        s_chatClear = NULL;
         s_chatVisible = FALSE;
         return 0;
     default:
@@ -2668,11 +2664,10 @@ static LRESULT CALLBACK ChatProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 void ChatPanelToggle(HWND mainHwnd)
 {
-    static const WCHAR CHAT_CLASS[] = L"KptChatPanel";
+    static const WCHAR CHAT_CLASS[] = L"KptChatWin";
 
     if (!s_chatPanel) {
         WNDCLASSEXW wc;
-        RECT rc;
         static BOOL registered = FALSE;
 
         if (!registered) {
@@ -2680,17 +2675,27 @@ void ChatPanelToggle(HWND mainHwnd)
             wc.cbSize = sizeof(wc);
             wc.lpfnWndProc = ChatProc;
             wc.hInstance = g_app.hInst;
+            wc.hIcon = LoadIconW(g_app.hInst, MAKEINTRESOURCEW(IDI_APP));
             wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
             wc.hbrBackground = NULL;
             wc.lpszClassName = CHAT_CLASS;
             if (RegisterClassExW(&wc))
                 registered = TRUE;
         }
-        GetClientRect(mainHwnd, &rc);
-        s_chatPanel = CreateWindowExW(0, CHAT_CLASS, NULL,
-                                      WS_CHILD | WS_VISIBLE,
-                                      rc.right - 360, 0, 360, rc.bottom,
-                                      mainHwnd, NULL, g_app.hInst, NULL);
+        /* 独立顶层窗口：锚定主窗口右侧，不遮挡主界面操作 */
+        {
+            int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+            if (mainHwnd) {
+                RECT rm;
+                GetWindowRect(mainHwnd, &rm);
+                x = rm.right + 8;
+                y = rm.top;
+            }
+            s_chatPanel = CreateWindowExW(0, CHAT_CLASS, L"AI 对话",
+                                          WS_OVERLAPPEDWINDOW,
+                                          x, y, 400, 560,
+                                          mainHwnd, NULL, g_app.hInst, NULL);
+        }
         if (!s_chatPanel)
             return;
         s_chatDisplay = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", NULL,
@@ -2718,21 +2723,21 @@ void ChatPanelToggle(HWND mainHwnd)
             SendMessageW(s_chatClear, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
         }
         SetWindowTextW(s_chatDisplay,
-            L"AI 对话面板\r\n\r\n"
-            L"输入问题后点击「发送」或按 Ctrl+Enter。\r\n"
+            L"AI 对话\r\n\r\n"
+            L"输入问题后点击「发送」。\r\n"
             L"支持多轮上下文（最近 6 轮）。\r\n"
             L"每次提问自动附带系统进程/端口快照。\r\n");
-        ChatLayout(mainHwnd);
+        ThemeApplyFrame(s_chatPanel);
+        ShowWindow(s_chatPanel, SW_SHOW);
+        UpdateWindow(s_chatPanel);
+        ChatLayout(s_chatPanel);
         s_chatVisible = TRUE;
     } else {
         s_chatVisible = !s_chatVisible;
-        ShowWindow(s_chatPanel, s_chatVisible ? SW_SHOW : SW_HIDE);
-        if (s_chatVisible) {
-            /* 展开时确保置顶 */
-            SetWindowPos(s_chatPanel, HWND_TOP, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            ChatLayout(mainHwnd);
-        }
+        if (s_chatVisible)
+            ShowWindow(s_chatPanel, SW_RESTORE);
+        else
+            ShowWindow(s_chatPanel, SW_HIDE);
     }
 }
 
