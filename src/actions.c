@@ -610,6 +610,8 @@ void ActionsOnListContextMenu(HWND hwnd, LPARAM lp)
                 s_aiRowIndex = idx;
                 AppendMenuW(m, MF_STRING, IDM_LIST_AI_ANALYZE,
                             L"AI 风险评估（kilo）");
+                AppendMenuW(m, MF_STRING, IDM_LIST_SMART_RESTART,
+                            L"智能重启（杀后原参数拉起）");
                 AppendMenuW(m, MF_STRING, IDM_LIST_COPY_CMD, L"复制完整命令行");
                 AppendMenuW(m, MF_STRING, IDM_LIST_OPEN_IN_TERMINAL,
                             L"在终端打开所在目录");
@@ -1831,6 +1833,225 @@ void ActionsAiConfigRecommend(HWND hwnd)
     if (s_aiEdit)
         SetWindowTextW(s_aiEdit,
             L"等待 kilo 返回…\r\n\r\n分析完成后将在此展示推荐配置项。");
+    if (g_app.hFont) {
+        SendMessageW(s_aiEdit, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        SendMessageW(s_aiStatus, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        SendMessageW(s_aiKillBtn, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+    }
+    ShowWindow(s_aiDlg, SW_SHOW);
+    UpdateWindow(s_aiDlg);
+    AiDlgLayout(s_aiDlg);
+    ThemeApplyFrame(s_aiDlg);
+    InvalidateRect(s_aiDlg, NULL, TRUE);
+    s_aiStartTick = GetTickCount64();
+    SetTimer(s_aiDlg, AI_DLG_TIMER, 1000, NULL);
+    if (!AiStartAnalysis(g_app.hMain, prompt)) {
+        KillTimer(s_aiDlg, AI_DLG_TIMER);
+        s_aiStartTick = 0;
+        SetWindowTextW(s_aiStatus, L"启动分析失败。");
+    }
+}
+
+/* ---------------- WP13: 智能重启 ---------------- */
+
+void ActionsSmartRestart(HWND hwnd, int rowIdx)
+{
+    LVITEMW it;
+    DWORD pid;
+    WCHAR cmd[1024], cwd[MAX_PATH];
+    WCHAR msg[512];
+    HANDLE h;
+    BOOL killed = FALSE;
+
+    (void)hwnd;
+    if (!g_app.hList || rowIdx < 0)
+        return;
+    ZeroMemory(&it, sizeof(it));
+    it.mask = LVIF_PARAM;
+    it.iItem = rowIdx;
+    if (!ListView_GetItem(g_app.hList, &it))
+        return;
+    pid = (DWORD)it.lParam;
+    if (!pid)
+        return;
+
+    /* 先取原始命令行与工作目录（杀之前） */
+    if (!PebQuery(pid, cmd, 1024, cwd, MAX_PATH) || !cmd[0]) {
+        MessageBoxW(NULL,
+            L"无法读取该进程命令行（权限不足或进程已退出），\n"
+            L"无法智能重启。可手动终止后自行启动。",
+            L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    StringCchPrintfW(msg, 512,
+        L"智能重启进程 PID %lu：\n\n"
+        L"命令行：%ls\n"
+        L"工作目录：%ls\n\n"
+        L"将终止当前进程并以原参数重新启动。继续？",
+        (unsigned long)pid, cmd, cwd[0] ? cwd : L"(默认)");
+    if (MessageBoxW(NULL, msg, L"智能重启",
+                    MB_YESNO | MB_ICONQUESTION) != IDYES)
+        return;
+
+    /* 终止 */
+    h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+    if (h) {
+        killed = TerminateProcess(h, 0);
+        CloseHandle(h);
+    }
+    if (!killed) {
+        MessageBoxW(NULL, L"终止进程失败。", L"错误", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    /* 等待句柄释放 */
+    Sleep(500);
+
+    /* 以原参数重新启动 */
+    {
+        STARTUPINFOW si;
+        PROCESS_INFORMATION pi;
+        ZeroMemory(&si, sizeof(si));
+        si.cb = sizeof(si);
+        if (CreateProcessW(NULL, cmd, NULL, NULL, FALSE,
+                           CREATE_NEW_CONSOLE, NULL,
+                           cwd[0] ? cwd : NULL, &si, &pi)) {
+            WCHAR text[128];
+            StringCchPrintfW(text, 128, L"已重启 PID %lu → 新 PID %lu。",
+                             (unsigned long)pid, (unsigned long)pi.dwProcessId);
+            TrayShowBalloon(MAIN_WINDOW_TITLE, text);
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+        } else {
+            WCHAR err[256];
+            StringCchPrintfW(err, 256,
+                L"重启失败（错误 %lu）：\n%ls\n\n"
+                L"进程已终止但未能重新启动。",
+                (unsigned long)GetLastError(), cmd);
+            MessageBoxW(NULL, err, L"智能重启失败", MB_OK | MB_ICONWARNING);
+        }
+    }
+
+    /* 落审计日志 */
+    KlogWrite(L"智能重启", NULL, pid, TRUE, 0);
+    ViewsRescan();
+}
+
+/* ---------------- WP9: AI 清理策略 ---------------- */
+
+/* 三档策略 */
+typedef enum {
+    STRAT_AUTO = 0,   /* 可安全自动清理 */
+    STRAT_MANUAL,     /* 需人工复核 */
+    STRAT_FORBID      /* 禁止操作 */
+} CleanStrategy;
+
+void ActionsAiCleanStrategy(HWND hwnd)
+{
+    ProcList orphans;
+    WCHAR context[8192];
+    WCHAR prompt[12288];
+    size_t ctxLen = 0;
+
+    (void)hwnd;
+    if (AiBusy())
+        return;
+
+    ZeroMemory(&orphans, sizeof(orphans));
+    if (ScanOrphanProcesses(&orphans, FALSE) < 0) {
+        MessageBoxW(NULL, L"孤儿扫描失败。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (orphans.count == 0) {
+        MessageBoxW(NULL, L"未发现孤儿进程。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    /* 组装上下文 */
+    context[0] = L'\0';
+    for (size_t i = 0; i < orphans.count && ctxLen < 8100; i++) {
+        WCHAR line[512];
+        StringCchPrintfW(line, 512, L"pid=%lu\t%ls\t%ls\t%ls\n",
+                         (unsigned long)orphans.items[i].pid,
+                         orphans.items[i].name,
+                         orphans.items[i].path,
+                         orphans.items[i].cmdline[0] ? orphans.items[i].cmdline : L"-");
+        StringCchCatW(context, 8192, line);
+        ctxLen = lstrlenW(context);
+    }
+    FreeProcList(&orphans);
+
+    StringCchPrintfW(prompt, 12288,
+        L"你是Windows进程清理策略专家。对以下孤儿进程给出清理策略分级。"
+        L"必须只输出一个JSON数组，格式：\n"
+        L"[{\"pid\":123,\"strategy\":\"auto|manual|forbid\",\"reason\":\"一句话\"}]\n"
+        L"auto=可安全自动清理（开发残留孤儿）；"
+        L"manual=需人工复核（可能承载服务）；"
+        L"forbid=禁止操作（系统关键）。孤儿进程清单：\n%ls",
+        context);
+
+    /* 打开 AI 报告窗口 */
+    free(s_aiPrompt);
+    s_aiPrompt = NULL;
+    {
+        size_t plen = (size_t)lstrlenW(prompt) + 1;
+        s_aiPrompt = (WCHAR *)malloc(plen * sizeof(WCHAR));
+        if (s_aiPrompt)
+            StringCchCopyW(s_aiPrompt, plen, prompt);
+    }
+    if (s_aiDlg)
+        DestroyWindow(s_aiDlg);
+    {
+        WNDCLASSEXW wc;
+        static BOOL registered2 = FALSE;
+        if (!registered2) {
+            ZeroMemory(&wc, sizeof(wc));
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = AiDlgProc;
+            wc.hInstance = g_app.hInst;
+            wc.hIcon = LoadIconW(g_app.hInst, MAKEINTRESOURCEW(IDI_APP));
+            wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+            wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+            wc.lpszClassName = AI_DLG_CLASS;
+            if (RegisterClassExW(&wc))
+                registered2 = TRUE;
+        }
+    }
+    s_aiPid = 0;
+    {
+        int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+        if (g_app.hMain) {
+            RECT rm;
+            GetWindowRect(g_app.hMain, &rm);
+            x = rm.left + AppScale(80);
+            y = rm.top + AppScale(50);
+        }
+        s_aiDlg = CreateWindowExW(0, AI_DLG_CLASS, L"AI 清理策略",
+                                  WS_OVERLAPPEDWINDOW,
+                                  x, y, AppScale(560), AppScale(440),
+                                  g_app.hMain, NULL, g_app.hInst, NULL);
+    }
+    if (!s_aiDlg)
+        return;
+    s_aiKillBtn = CreateWindowExW(0, L"BUTTON", L"清理 auto 项",
+                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  0, 0, AppScale(130), AppScale(30),
+                                  s_aiDlg, (HMENU)(INT_PTR)IDAI_KILL, g_app.hInst, NULL);
+    s_aiStatus = CreateWindowExW(0, L"STATIC",
+                                 L"AI 策略分析中…（约 40~90 秒）",
+                                 WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+                                 0, 0, AppScale(300), AppScale(30),
+                                 s_aiDlg, NULL, g_app.hInst, NULL);
+    s_aiEdit = RichTextCreate(s_aiDlg, 0);
+    if (s_aiEdit)
+        SetWindowTextW(s_aiEdit,
+            L"等待 kilo 返回…\r\n\r\n"
+            L"策略分档：\r\n"
+            L"  ✅ auto = 可安全自动清理\r\n"
+            L"  ⚠️ manual = 需人工复核\r\n"
+            L"  ❌ forbid = 禁止操作\r\n\r\n"
+            L"分析完成后可点击「清理 auto 项」执行。");
     if (g_app.hFont) {
         SendMessageW(s_aiEdit, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
         SendMessageW(s_aiStatus, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);

@@ -152,6 +152,15 @@ UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\c
 
 ## 8. 更新日志
 
+- **v6.0.1（2026-10-06）**：v6.0 补全——
+  **WP13 智能重启**——任意进程右键新增「智能重启（杀后原参数拉起）」：
+  PEB 采集原命令行+工作目录 → 确认弹窗 → TerminateProcess →
+  CreateProcessW 以原参数+原 cwd 重新启动 → 气泡通知新旧 PID 映射；
+  重启失败弹窗提示原命令行供手动恢复；审计日志来源=智能重启；
+  **WP9 AI 清理策略**——托盘菜单新增「AI 清理策略」：扫描全量孤儿 →
+  kilo 三档分级（✅auto=安全自动清理 / ⚠️manual=需人工复核 /
+  ❌forbid=禁止操作）→ AI 报告窗口展示策略清单 → 「清理 auto 项」
+  按钮一键执行安全项（护栏兜底：系统进程始终拦截）。
 - **v6.0（2026-10-06）**：v6.0 两项——
   **WP8 项目分组 UI**——Node/Python 页签新增「项目」复选框（持久化
   ProjectView 配置）；快照采集时对 node/python 进程调 GetProcessProject

@@ -80,6 +80,8 @@ LRESULT TrayHandleMessage(HWND owner, WPARAM wp, LPARAM lp)
             AppendMenuW(m, MF_STRING, IDM_TRAY_REFRESH, L"刷新进程列表");
             AppendMenuW(m, MF_STRING, IDM_TRAY_KILL_NODE, L"杀死全部 Node.js");
             AppendMenuW(m, MF_STRING, IDM_TRAY_KILL_PY, L"杀死全部 Python");
+            AppendMenuW(m, MF_STRING, IDM_TRAY_ORPHAN, L"清理孤儿进程...");
+            AppendMenuW(m, MF_STRING, IDM_TRAY_AI_CLEAN, L"AI 清理策略...");
             AppendMenuW(m, MF_SEPARATOR, 0, NULL);
             AppendMenuW(m, MF_STRING | (StartupIsEnabled() ? MF_CHECKED : 0),
                         IDM_TRAY_AUTOSTART, L"开机自启动");

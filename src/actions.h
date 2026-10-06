@@ -63,4 +63,10 @@ void CopyRowCmdline(HWND owner, int rowIdx);
 /* 取最近一次右键命中的行索引（Dev 快捷操作定位用） */
 int ActionsGetContextRow(void);
 
+/* WP13: 智能重启 — 杀进程后用原命令行+cwd 拉起 */
+void ActionsSmartRestart(HWND hwnd, int rowIdx);
+
+/* WP9: AI 清理策略 — 孤儿分档（auto/manual/forbid）+ 确认执行 */
+void ActionsAiCleanStrategy(HWND hwnd);
+
 #endif

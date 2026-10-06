@@ -498,6 +498,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_LIST_OPEN_IN_TERMINAL:
             OpenRowTerminal(ActionsGetContextRow());
             break;
+        case IDM_LIST_SMART_RESTART:
+            ActionsSmartRestart(hwnd, ActionsGetContextRow());
+            break;
         case IDC_EDIT_FILTER:
             if (HIWORD(wp) == EN_CHANGE)
                 ViewsRebuild(); /* 输入即筛选：只重绘，不重扫 */
@@ -550,6 +553,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDM_TRAY_ORPHAN:
             ActionsCleanOrphans(FALSE);
+            break;
+        case IDM_TRAY_AI_CLEAN:
+            ActionsAiCleanStrategy(hwnd);
             break;
         case IDM_TRAY_AUTOSTART: {
             BOOL ok = StartupIsEnabled() ? StartupDisable() : StartupEnable();
