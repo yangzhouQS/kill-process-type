@@ -9,6 +9,8 @@
 #include "app.h"
 #include "resource.h"
 #include "config.h"
+#include "klog.h"
+#include "monitor.h"
 #include "startup.h"
 #include "theme.h"
 #include "settings.h"
@@ -339,6 +341,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ViewsRescan();
         else if (wp == TIMER_ORPHAN)
             ActionsCleanOrphans(TRUE); /* 定时静默清理孤儿进程 */
+        else if (wp == TIMER_AUTO_REFRESH) {
+            /* WP11: 自动刷新时同步注册监控 + 异常检测 */
+            if (g_app.hChkAuto &&
+                SendMessageW(g_app.hChkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+                IsWindowVisible(hwnd)) {
+                ViewsRescan();
+                /* 自动注册 node/python 进程到时序监控 */
+                if (ConfigGetBool(L"AnomalyWatch", FALSE)) {
+                    for (size_t k = 0; k < g_app.procs.count; k++)
+                        if (g_app.procs.items[k].type != PT_NONE)
+                            MonitorAdd(g_app.procs.items[k].pid);
+                    ActionsAnomalyCheck();
+                }
+            }
+        }
         return 0;
 
     case WM_APP_TRAY:
@@ -556,6 +573,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDM_TRAY_AI_CLEAN:
             ActionsAiCleanStrategy(hwnd);
+            break;
+        case IDM_TRAY_BASE_SAVE:
+            ActionsSaveBaseline(hwnd);
+            break;
+        case IDM_TRAY_BASE_CMP:
+            ActionsCompareBaseline(hwnd);
             break;
         case IDM_TRAY_AUTOSTART: {
             BOOL ok = StartupIsEnabled() ? StartupDisable() : StartupEnable();

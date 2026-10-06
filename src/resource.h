@@ -18,6 +18,8 @@
 #define IDM_TRAY_SETTINGS  1107
 #define IDM_TRAY_ORPHAN    1108
 #define IDM_TRAY_AI_CLEAN  1109
+#define IDM_TRAY_BASE_SAVE 1110
+#define IDM_TRAY_BASE_CMP  1111
 
 /* 主窗口控件 ID */
 #define IDC_BTN_REFRESH   2001

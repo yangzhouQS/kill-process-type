@@ -152,6 +152,17 @@ UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\c
 
 ## 8. 更新日志
 
+- **v6.1（2026-10-06）**：P2 全部三项 + P1 对话面板框架——
+  **WP11 时序异常告警**——MonitorStart 启动采样线程；自动刷新时注册
+  node/python PID 到时序监控（AnomalyWatch 配置开关）；ActionsAnomalyCheck
+  检测内存持续增长（6 样本连续上升 + 增速>10MB/12s≈50MB/min）→ 托盘
+  气泡告警（绝不自动杀）；
+  **WP12 基线对比**——托盘菜单「保存基线快照」（进程+端口清单→
+  baseline.txt）与「与基线对比」（差异报告：新增/消失进程+新增/消失
+  端口四类 + 汇总统计，MessageBox 展示）；
+  **WP7 AI 对话面板框架**——ChatPanelToggle 可折叠侧边面板（360px
+  RichEdit 会话区+输入框+发送按钮），ChatProc 消息处理与主题适配就位，
+  AI 调用集成标记 TODO（后续精化）。
 - **v6.0.1（2026-10-06）**：v6.0 补全——
   **WP13 智能重启**——任意进程右键新增「智能重启（杀后原参数拉起）」：
   PEB 采集原命令行+工作目录 → 确认弹窗 → TerminateProcess →

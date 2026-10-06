@@ -83,6 +83,9 @@ LRESULT TrayHandleMessage(HWND owner, WPARAM wp, LPARAM lp)
             AppendMenuW(m, MF_STRING, IDM_TRAY_ORPHAN, L"清理孤儿进程...");
             AppendMenuW(m, MF_STRING, IDM_TRAY_AI_CLEAN, L"AI 清理策略...");
             AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(m, MF_STRING, IDM_TRAY_BASE_SAVE, L"保存基线快照");
+            AppendMenuW(m, MF_STRING, IDM_TRAY_BASE_CMP, L"与基线对比...");
+            AppendMenuW(m, MF_SEPARATOR, 0, NULL);
             AppendMenuW(m, MF_STRING | (StartupIsEnabled() ? MF_CHECKED : 0),
                         IDM_TRAY_AUTOSTART, L"开机自启动");
             AppendMenuW(m, MF_STRING, IDM_TRAY_SETTINGS, L"设置...");

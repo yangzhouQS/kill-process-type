@@ -69,4 +69,14 @@ void ActionsSmartRestart(HWND hwnd, int rowIdx);
 /* WP9: AI 清理策略 — 孤儿分档（auto/manual/forbid）+ 确认执行 */
 void ActionsAiCleanStrategy(HWND hwnd);
 
+/* WP11: 时序异常检测（WM_TIMER 周期调用） */
+void ActionsAnomalyCheck(void);
+
+/* WP12: 基线保存/对比 */
+void ActionsSaveBaseline(HWND hwnd);
+void ActionsCompareBaseline(HWND hwnd);
+
+/* WP7: AI 对话面板（显示/隐藏切换） */
+void ChatPanelToggle(HWND mainHwnd);
+
 #endif

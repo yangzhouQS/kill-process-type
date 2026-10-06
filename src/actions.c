@@ -14,6 +14,7 @@
 #include "resource.h"
 #include "config.h"
 #include "klog.h"
+#include "monitor.h"
 #include "net.h"
 #include "peb.h"
 #include "startup.h"
@@ -2068,6 +2069,404 @@ void ActionsAiCleanStrategy(HWND hwnd)
         KillTimer(s_aiDlg, AI_DLG_TIMER);
         s_aiStartTick = 0;
         SetWindowTextW(s_aiStatus, L"启动分析失败。");
+    }
+}
+
+/* ---------------- WP11: 时序异常告警 ---------------- */
+
+void ActionsAnomalyCheck(void)
+{
+    ULONGLONG mem[60];
+    double cpu[60];
+
+    if (!ConfigGetBool(L"AnomalyWatch", FALSE))
+        return;
+    if (MonitorCount() == 0)
+        return;
+
+    /* 检查缓存中每个 node/python 进程的时序 */
+    for (size_t k = 0; k < g_app.procs.count; k++) {
+        DWORD pid;
+        int n;
+
+        if (g_app.procs.items[k].type == PT_NONE)
+            continue;
+        pid = g_app.procs.items[k].pid;
+        n = MonitorGetSeries(pid, mem, cpu, 60);
+        if (n < 6)
+            continue; /* 数据不足 */
+        {
+            ULONGLONG growth = mem[n - 1] - mem[n - 6];
+            int increasing = 1;
+            for (int j = n - 5; j < n; j++)
+                if (mem[j] < mem[j - 1]) {
+                    increasing = 0;
+                    break;
+                }
+            if (increasing && growth > 10ULL * 1024 * 1024) {
+                WCHAR text[256];
+                StringCchPrintfW(text, 256,
+                    L"⚠ %ls（PID %lu）内存持续增长：12秒内 +%.1fMB",
+                    g_app.procs.items[k].name,
+                    (unsigned long)pid,
+                    (double)growth / (1024.0 * 1024.0));
+                TrayShowBalloon(MAIN_WINDOW_TITLE, text);
+            }
+        }
+    }
+}
+
+/* ---------------- WP12: 基线对比 ---------------- */
+
+void ActionsSaveBaseline(HWND hwnd)
+{
+    ProcList l;
+    NetList nl;
+    HANDLE f;
+    WCHAR path[MAX_PATH];
+    WCHAR exe[MAX_PATH];
+
+    (void)hwnd;
+    /* 基线存 exe 旁 baseline.txt */
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH))
+        return;
+    {
+        WCHAR *slash = wcsrchr(exe, L'\\');
+        if (slash) {
+            *slash = 0;
+            StringCchPrintfW(path, MAX_PATH, L"%ls\\baseline.txt", exe);
+        } else
+            return;
+    }
+
+    ZeroMemory(&l, sizeof(l));
+    ZeroMemory(&nl, sizeof(nl));
+    ScanAllProcesses(&l);
+    ScanListenPorts(&nl);
+
+    f = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                    FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        MessageBoxW(NULL, L"保存基线失败。", L"错误", MB_OK | MB_ICONERROR);
+        return;
+    }
+    {
+        char utf8[1024];
+        int n;
+        DWORD w;
+
+        /* 进程清单 */
+        for (size_t i = 0; i < l.count; i++) {
+            WCHAR line[512];
+            StringCchPrintfW(line, 512, L"P\t%lu\t%ls\t%ls\n",
+                             (unsigned long)l.items[i].pid,
+                             l.items[i].name,
+                             l.items[i].path[0] ? l.items[i].path : L"-");
+            n = WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, 1024, NULL, NULL);
+            if (n > 1)
+                WriteFile(f, utf8, n - 1, &w, NULL);
+        }
+        /* 端口清单 */
+        for (size_t i = 0; i < nl.count; i++) {
+            WCHAR line[256];
+            StringCchPrintfW(line, 256, L"L\t%lu\t%ls\t%lu\n",
+                             (unsigned long)nl.items[i].port,
+                             nl.items[i].tcp ? L"TCP" : L"UDP",
+                             (unsigned long)nl.items[i].pid);
+            n = WideCharToMultiByte(CP_UTF8, 0, line, -1, utf8, 512, NULL, NULL);
+            if (n > 1)
+                WriteFile(f, utf8, n - 1, &w, NULL);
+        }
+    }
+    CloseHandle(f);
+    FreeProcList(&l);
+    FreeNetList(&nl);
+    TrayShowBalloon(MAIN_WINDOW_TITLE, L"基线快照已保存。");
+}
+
+void ActionsCompareBaseline(HWND hwnd)
+{
+    WCHAR path[MAX_PATH], exe[MAX_PATH];
+    HANDLE f;
+    char raw[256 * 1024];
+    DWORD got = 0;
+    ProcList l;
+    NetList nl;
+    WCHAR report[4096];
+    size_t rp = 0;
+    int newProcs = 0, goneProcs = 0, newPorts = 0, gonePorts = 0;
+
+    (void)hwnd;
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH))
+        return;
+    {
+        WCHAR *slash = wcsrchr(exe, L'\\');
+        if (slash) {
+            *slash = 0;
+            StringCchPrintfW(path, MAX_PATH, L"%ls\\baseline.txt", exe);
+        } else
+            return;
+    }
+
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                    OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        MessageBoxW(NULL, L"请先保存基线快照。", L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    {
+        DWORD sz = GetFileSize(f, NULL);
+        if (sz > sizeof(raw) - 1)
+            sz = sizeof(raw) - 1;
+        ReadFile(f, raw, sz, &got, NULL);
+        raw[got] = '\0';
+    }
+    CloseHandle(f);
+
+    /* 当前快照 */
+    ZeroMemory(&l, sizeof(l));
+    ZeroMemory(&nl, sizeof(nl));
+    ScanAllProcesses(&l);
+    ScanListenPorts(&nl);
+
+    report[0] = L'\0';
+    StringCchCatW(report, 4096, L"基线对比结果：\r\n\r\n");
+
+    /* 解析基线：P\tpid\tname\tpath / L\tport\tproto\tpid */
+    {
+        WCHAR wide[256 * 1024];
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, raw, (int)got, wide, 256 * 1024);
+        WCHAR *p2;
+        wide[wlen] = L'\0';
+
+        /* 检查新增进程（当前有但基线无） */
+        StringCchCatW(report, 4096, L"【新增进程】\r\n");
+        for (size_t i = 0; i < l.count && rp < 3800; i++) {
+            if (l.items[i].pid == 0 || l.items[i].pid == 4)
+                continue;
+            BOOL found = FALSE;
+            for (p2 = wcsstr(wide, L"P\t"); p2; p2 = wcsstr(p2 + 1, L"P\t")) {
+                DWORD bPid = _wtol(p2 + 2);
+                if (bPid == l.items[i].pid) {
+                    found = TRUE;
+                    break;
+                }
+            }
+            if (!found) {
+                WCHAR line2[256];
+                StringCchPrintfW(line2, 256, L"  + %ls (PID %lu)\r\n",
+                                 l.items[i].name, (unsigned long)l.items[i].pid);
+                StringCchCatW(report, 4096, line2);
+                rp = lstrlenW(report);
+                newProcs++;
+            }
+        }
+        if (newProcs == 0)
+            StringCchCatW(report, 4096, L"  （无）\r\n");
+
+        /* 检查消失进程（基线有但当前无） */
+        StringCchCatW(report, 4096, L"\r\n【消失进程】\r\n");
+        for (p2 = wcsstr(wide, L"P\t"); p2 && rp < 3900; p2 = wcsstr(p2 + 1, L"P\t")) {
+            DWORD bPid = _wtol(p2 + 2);
+            if (bPid == 0 || bPid == 4)
+                continue;
+            BOOL found = FALSE;
+            for (size_t i = 0; i < l.count; i++)
+                if (l.items[i].pid == bPid) {
+                    found = TRUE;
+                    break;
+                }
+            if (!found) {
+                WCHAR name[64] = {0};
+                WCHAR *tab1 = wcschr(p2 + 2, L'\t');
+                if (tab1) {
+                    WCHAR *tab2 = wcschr(tab1 + 1, L'\t');
+                    if (tab2) {
+                        size_t nl2 = (size_t)(tab2 - tab1 - 1);
+                        if (nl2 > 63) nl2 = 63;
+                        StringCchCopyNW(name, 64, tab1 + 1, nl2 + 1);
+                    }
+                }
+                {
+                    WCHAR line2[256];
+                    StringCchPrintfW(line2, 256, L"  - %ls (PID %lu)\r\n",
+                                     name, (unsigned long)bPid);
+                    StringCchCatW(report, 4096, line2);
+                    rp = lstrlenW(report);
+                    goneProcs++;
+                }
+            }
+        }
+        if (goneProcs == 0)
+            StringCchCatW(report, 4096, L"  （无）\r\n");
+
+        /* 新增端口 */
+        StringCchCatW(report, 4096, L"\r\n【新增端口】\r\n");
+        for (size_t i = 0; i < nl.count && rp < 4000; i++) {
+            WCHAR pat[32];
+            StringCchPrintfW(pat, 32, L"L\t%lu\t", (unsigned long)nl.items[i].port);
+            if (!wcsstr(wide, pat)) {
+                WCHAR line2[128];
+                StringCchPrintfW(line2, 128, L"  + %lu %ls (PID %lu)\r\n",
+                                 (unsigned long)nl.items[i].port,
+                                 nl.items[i].tcp ? L"TCP" : L"UDP",
+                                 (unsigned long)nl.items[i].pid);
+                StringCchCatW(report, 4096, line2);
+                rp = lstrlenW(report);
+                newPorts++;
+            }
+        }
+        if (newPorts == 0)
+            StringCchCatW(report, 4096, L"  （无）\r\n");
+
+        /* 消失端口 */
+        StringCchCatW(report, 4096, L"\r\n【消失端口】\r\n");
+        for (p2 = wcsstr(wide, L"L\t"); p2 && rp < 4050; p2 = wcsstr(p2 + 1, L"L\t")) {
+            DWORD bPort = _wtol(p2 + 2);
+            BOOL found = FALSE;
+            for (size_t i = 0; i < nl.count; i++)
+                if (nl.items[i].port == bPort) {
+                    found = TRUE;
+                    break;
+                }
+            if (!found) {
+                WCHAR line2[128];
+                StringCchPrintfW(line2, 128, L"  - %lu\r\n", (unsigned long)bPort);
+                StringCchCatW(report, 4096, line2);
+                rp = lstrlenW(report);
+                gonePorts++;
+            }
+        }
+        if (gonePorts == 0)
+            StringCchCatW(report, 4096, L"  （无）\r\n");
+    }
+
+    FreeProcList(&l);
+    FreeNetList(&nl);
+
+    StringCchPrintfW(report + lstrlenW(report), 128,
+                     L"\r\n汇总：新增进程 %d、消失 %d、新增端口 %d、消失 %d",
+                     newProcs, goneProcs, newPorts, gonePorts);
+    MessageBoxW(NULL, report, L"基线对比", MB_OK | MB_ICONINFORMATION);
+}
+
+/* ---------------- WP7: AI 对话面板 ---------------- */
+
+static HWND s_chatPanel;
+static HWND s_chatInput, s_chatDisplay, s_chatSend;
+static BOOL s_chatVisible = FALSE;
+
+static void ChatLayout(HWND parent)
+{
+    if (!s_chatPanel)
+        return;
+    {
+        RECT rc;
+        int pw = 360; /* 固定宽度面板 */
+        GetClientRect(parent, &rc);
+        MoveWindow(s_chatPanel, rc.right - pw, 0, pw, rc.bottom, TRUE);
+        {
+            RECT prc;
+            GetClientRect(s_chatPanel, &prc);
+            MoveWindow(s_chatDisplay, 4, 4, prc.right - 8, prc.bottom - 100, TRUE);
+            MoveWindow(s_chatInput, 4, prc.bottom - 88, prc.right - 8 - 80, 80, TRUE);
+            MoveWindow(s_chatSend, prc.right - 72, prc.bottom - 88, 68, 80, TRUE);
+        }
+    }
+}
+
+static LRESULT CALLBACK ChatProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_SIZE:
+        ChatLayout(GetParent(hwnd));
+        return 0;
+    case WM_ERASEBKGND:
+        if (ThemeOnEraseBkgnd(hwnd, (HDC)wp))
+            return 1;
+        break;
+    case WM_COMMAND:
+        if (LOWORD(wp) == 3) { /* 发送按钮 */
+            WCHAR input[2048];
+            GetWindowTextW(s_chatInput, input, 2048);
+            if (input[0]) {
+                /* TODO: 构建上下文 → AiStartAnalysis → 结果追加到 chatDisplay */
+                WCHAR line[2200];
+                StringCchPrintfW(line, 2200, L"你：%ls\r\n\r\n（等待 AI 回复…）\r\n\r\n", input);
+                {
+                    int len = GetWindowTextLengthW(s_chatDisplay);
+                    SendMessageW(s_chatDisplay, EM_SETSEL, len, len);
+                    SendMessageW(s_chatDisplay, EM_REPLACESEL, FALSE, (LPARAM)line);
+                }
+                SetWindowTextW(s_chatInput, L"");
+            }
+        }
+        return 0;
+    case WM_CLOSE:
+        ShowWindow(hwnd, SW_HIDE);
+        s_chatVisible = FALSE;
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void ChatPanelToggle(HWND mainHwnd)
+{
+    static const WCHAR CHAT_CLASS[] = L"KptChatPanel";
+
+    if (!s_chatPanel) {
+        WNDCLASSEXW wc;
+        RECT rc;
+        static BOOL registered = FALSE;
+
+        if (!registered) {
+            ZeroMemory(&wc, sizeof(wc));
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = ChatProc;
+            wc.hInstance = g_app.hInst;
+            wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+            wc.hbrBackground = NULL;
+            wc.lpszClassName = CHAT_CLASS;
+            if (RegisterClassExW(&wc))
+                registered = TRUE;
+        }
+        GetClientRect(mainHwnd, &rc);
+        s_chatPanel = CreateWindowExW(0, CHAT_CLASS, NULL,
+                                      WS_CHILD | WS_VISIBLE,
+                                      rc.right - 360, 0, 360, rc.bottom,
+                                      mainHwnd, NULL, g_app.hInst, NULL);
+        if (!s_chatPanel)
+            return;
+        s_chatDisplay = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", NULL,
+                                        WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+                                            ES_MULTILINE | ES_AUTOVSCROLL,
+                                        0, 0, 100, 100,
+                                        s_chatPanel, NULL, g_app.hInst, NULL);
+        s_chatInput = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", NULL,
+                                      WS_CHILD | WS_VISIBLE | ES_MULTILINE |
+                                          ES_AUTOVSCROLL,
+                                      0, 0, 100, 80,
+                                      s_chatPanel, (HMENU)(INT_PTR)2, g_app.hInst, NULL);
+        s_chatSend = CreateWindowExW(0, L"BUTTON", L"发送",
+                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                     0, 0, 68, 80,
+                                     s_chatPanel, (HMENU)(INT_PTR)3, g_app.hInst, NULL);
+        if (g_app.hFont) {
+            SendMessageW(s_chatDisplay, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+            SendMessageW(s_chatInput, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+            SendMessageW(s_chatSend, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        }
+        SetWindowTextW(s_chatDisplay,
+            L"AI 对话面板\r\n\r\n"
+            L"输入问题后点击「发送」。\r\n"
+            L"当前为框架版本，AI 调用集成待后续精化。\r\n");
+        ChatLayout(mainHwnd);
+        s_chatVisible = TRUE;
+    } else {
+        s_chatVisible = !s_chatVisible;
+        ShowWindow(s_chatPanel, s_chatVisible ? SW_SHOW : SW_HIDE);
     }
 }
 
