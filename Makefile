@@ -3,8 +3,8 @@ CC      = gcc
 WINDRES = windres
 CFLAGS  = -municode -mwindows -O2 -Wall -Wextra -static
 LIBS    = -lcomctl32 -lpsapi -liphlpapi
-SRCS    = src/main.c src/gui.c src/views.c src/actions.c src/ai.c src/cli.c src/richtext.c src/config.c src/theme.c src/settings.c src/tray.c src/process.c src/net.c src/startup.c
-OBJS    = build/main.o build/gui.o build/views.o build/actions.o build/ai.o build/cli.o build/richtext.o build/config.o build/theme.o build/settings.o build/tray.o build/process.o build/net.o build/startup.o build/app_res.o
+SRCS    = src/main.c src/gui.c src/views.c src/actions.c src/ai.c src/cli.c src/richtext.c src/config.c src/klog.c src/peb.c src/monitor.c src/project.c src/theme.c src/settings.c src/tray.c src/process.c src/net.c src/startup.c
+OBJS    = build/main.o build/gui.o build/views.o build/actions.o build/ai.o build/cli.o build/richtext.o build/config.o build/klog.o build/peb.o build/monitor.o build/project.o build/theme.o build/settings.o build/tray.o build/process.o build/net.o build/startup.o build/app_res.o
 
 all: build/kill-process-type.exe
 

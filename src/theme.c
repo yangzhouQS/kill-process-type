@@ -204,12 +204,15 @@ BOOL ThemeOnEraseBkgnd(HWND hwnd, HDC hdc)
 {
     RECT rc;
 
-    (void)hwnd;
-    if (!s_dark)
-        return FALSE;
     GetClientRect(hwnd, &rc);
-    EnsureBrushes();
-    FillRect(hdc, &rc, s_brBack);
+    if (s_dark) {
+        EnsureBrushes();
+        FillRect(hdc, &rc, s_brBack);
+    } else {
+        /* 浅色也显式填充：窗口类刷子为 NULL 的动态窗口（设置/AI）必须擦除，
+         * 否则深->浅切换后残留旧深色背景 */
+        FillRect(hdc, &rc, (HBRUSH)GetSysColorBrush(COLOR_WINDOW));
+    }
     return TRUE;
 }
 
@@ -221,8 +224,14 @@ HBRUSH ThemeOnCtlColor(HWND ctrl, HDC hdc)
         return NULL;
     if (!GetClassNameW(ctrl, cls, 32))
         return NULL;
-    if (wcscmp(cls, L"Edit") == 0 || wcscmp(cls, L"Static") == 0 ||
-        wcscmp(cls, L"Button") == 0 || wcscmp(cls, L"msctls_statusbar32") == 0) {
+    if (wcscmp(cls, L"Edit") == 0) {
+        SetBkColor(hdc, CLR_BACK);
+        SetTextColor(hdc, CLR_TEXT);
+        EnsureBrushes();
+        return s_brBack;
+    }
+    if (wcscmp(cls, L"Static") == 0 || wcscmp(cls, L"Button") == 0 ||
+        wcscmp(cls, L"msctls_statusbar32") == 0) {
         SetBkColor(hdc, CLR_BACK);
         SetTextColor(hdc, CLR_TEXT);
         EnsureBrushes();

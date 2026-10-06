@@ -13,7 +13,7 @@ if not exist build mkdir build
 "%WINDRES%" res\app.rc -O coff -o build\app_res.o
 if errorlevel 1 goto :err
 
-gcc -municode -mwindows -O2 -Wall -Wextra -static -o build\kill-process-type.exe src\main.c src\gui.c src\views.c src\actions.c src\ai.c src\cli.c src\richtext.c src\config.c src\theme.c src\settings.c src\tray.c src\process.c src\net.c src\startup.c build\app_res.o -lcomctl32 -lpsapi -liphlpapi
+gcc -municode -mwindows -O2 -Wall -Wextra -static -o build\kill-process-type.exe src\main.c src\gui.c src\views.c src\actions.c src\ai.c src\cli.c src\richtext.c src\config.c src\klog.c src\peb.c src\monitor.c src\project.c src\theme.c src\settings.c src\tray.c src\process.c src\net.c src\startup.c build\app_res.o -lcomctl32 -lpsapi -liphlpapi
 if errorlevel 1 goto :err
 
 echo Build OK: build\kill-process-type.exe

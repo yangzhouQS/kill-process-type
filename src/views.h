@@ -19,6 +19,9 @@ void ViewsApplyMode(BOOL rescan);
 /* 列头点击排序：同列切换升降序，异列切换排序列（单列生效） */
 void ViewsSortBy(int col);
 
+/* 树形模式：切换某 PID 子树的折叠状态并重建列表 */
+void ViewsToggleCollapse(DWORD pid);
+
 /* 释放数据缓存（WM_DESTROY 调用） */
 void ViewsCleanup(void);
 

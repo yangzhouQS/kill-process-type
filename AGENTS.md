@@ -26,11 +26,13 @@
 | `gui.c` | 主窗口外壳：控件创建、布局、字体、页签、消息路由 |
 | `views.c` | 视图渲染：列定义、筛选匹配、快照→行填充、勾选跨刷新保持、状态栏统计 |
 | `actions.c` | 用户动作：终止进程（全部类型/勾选）、复制路径、列表右键菜单 |
-| `process.c` | 进程枚举（node/python 识别 `ClassifyName`、全进程）、`TerminateProcess` 封装 |
+| `process.c` | 进程枚举（node/python 识别 `ClassifyName`、全进程）、孤儿进程扫描（ppid 失活检测 + 系统安全护栏）、`TerminateProcess` 封装 |
 | `net.c` | 端口监听扫描（GetExtendedTcpTable/UDP，双栈）+ 系统保留端口区间（netsh excludedportrange 解析） |
 | `ai.c` | AI 风险评估：无头调用 kilo run `--format json --thinking`（reasoning/text 事件分离解析 + 3 次退避重试 + stderr 诊断，路径回退链 KILO_EXE→仓库→D:\kilo→PATH） |
 | `richtext.c` | Rich Edit 渲染：Markdown 子集→RTF（注意 RTF 字体必须 \fcharset134，否则中文乱码） |
-| `cli.c` | 无头 CLI：/list /ports /kill，UTF-8 JSON 到 stdout（供 AI 工具链调用） |
+| `klog.c/.h` | 终止进程日志：追加落盘（UTF-8 BOM + 制表符，512KB 滚动）+ 视图加载（最近 500 条，新记录在前） |
+| `peb.c/.h` | 读进程完整命令行+工作目录（NtQueryInformationProcess → PEB → ProcessParameters，x64 偏移 cmdline@+0x70/cwd@+0x38；仅同用户普通进程可读） |
+| `cli.c` | 无头 CLI：/list /ports /orphans[:nodepy] /kill /top [type] [N]，UTF-8 JSON 到 stdout（供 AI 工具链调用）；/kill 同样落日志（需自行 ConfigInit+KlogInit） |
 | `config.c/.h` | 配置持久化（INI：exe 目录优先，%APPDATA% 回退；Profile API 直读直写） |
 | `theme.c/.h` | 深色主题（DWM 标题栏/ListView/表头自绘/Tab 子类化+OWNERDRAW/按钮 ownerdraw；浅色零侵入走系统默认） |
 | `settings.c/.h` | 设置窗口：自启/启动最小化/主题/自动刷新/气泡通知，全部实时生效 |
@@ -40,7 +42,10 @@
 **模块规则**：
 - 新增功能先确定归属：纯数据逻辑 → process/net；列表怎么显示 → views；用户操作 → actions；窗口/控件/路由 → gui。
 - 控件句柄与状态一律走 `g_app`，禁止新增文件级 static 副本。
-- 视图模式新增时：`app.h` 加枚举 + `views.c` 加列定义与行渲染分支 + `gui.c` 页签数组加一项，三处同步。
+- 视图模式新增时：`app.h` 加枚举 + `views.c` 加列定义/行渲染/比较器分支 +
+  `gui.c` 页签数组加一项 + `actions.c` 右键列号映射，四处同步。
+- 树形模式（ALL 视图）排序走 `TreeIdxCmp`（兄弟节点排序），与平铺排序
+  `CmpXxxRow` 互斥；`ApplySort` 已跳过树形模式，勿重复排序缓存。
 
 ## 硬性约定（全部踩过坑，勿违反）
 
@@ -79,6 +84,13 @@
     DRAWITEMSTRUCT 字段是 `hDC`、NMCUSTOMDRAW 是 `hdc`（大小写不同，别搞混）；
     **处理 NM_CUSTOMDRAW 必须先验证 hwndFrom 是 SysHeader32**——ListView 自身
     绘制项时也发该通知，误劫持返回 SKIPDEFAULT 会导致整列表空白不绘制。
+14. **动态窗口（设置/AI）的 WM_ERASEBKGND 必须深浅都显式填充**（dark=CLR_BACK、
+    light=COLOR_WINDOW）并返回 1：类刷子为 NULL 时浅色走 DefWindowProc 不擦除，
+    深→浅切换后会残留深色背景 + 白底控件混贴的花脸。
+15. **弹窗（设置/AI）禁止 CW_USEDEFAULT 定位**：会漂到异 DPI 屏幕导致子控件
+    被系统按缩放比错位放大（实测按钮 90x30 变 135x45 跑出窗外）。必须锚定
+    主窗口位置创建，且各弹窗维护**本地 DPI**（勿写全局 g_app.dpi 污染主窗口），
+    并处理自身 WM_DPICHANGED。
 
 ## 测试纪律
 
@@ -88,6 +100,19 @@
   右键复制、页签切换、列排序的真实代码路径），并手工冒烟：启动→三个页签
   切换→列头排序→托盘右键→退出。
 - 改 `cli.c` → 跑 `tests\cli-test.ps1`（/list /ports /kill，JSON 必须可解析）。
+- 改 `process.c` 的孤儿扫描 → 造真孤儿验证：`tests\orphan-timer-test.ps1`
+  （spawn 孤儿 node → /orphans 检出 → 1 分钟定时器自动清理，全程 ~90 秒）；
+  注意安全护栏不可回退：路径不可读的进程（csrss/winlogon 等 SYSTEM 会话
+  进程）必须跳过，误杀会蓝屏。
+- 改 `klog.c / 日志视图` → 跑 `tests\log-view-test.ps1`（CLI 杀 dummy →
+  落日志行 → GUI 切日志页签行数/内容断言）；**大日志量必跑压测**：
+  `gcc -municode -O2 -g -o build\test_klog.exe tests\test_klog.c src\klog.c src\config.c`
+  后 `build\test_klog.exe 300`（300 轮加载真实日志，历史教训：头部插入
+  memmove 写错参数导致 220 条记录时越界 163KB 堆损坏闪退，2-3 条测试数据
+  完全测不出）。
+  （spawn 孤儿 node → /orphans 检出 → 1 分钟定时器自动清理，全程 ~90 秒）；
+  注意安全护栏不可回退：路径不可读的进程（csrss/winlogon 等 SYSTEM 会话
+  进程）必须跳过，误杀会蓝屏。
 - 改 `theme.c / config.c / settings.c` → 跑 `tests\theme-test.ps1`（浅/深色生效
   断言用 LVM_GETTEXTCOLOR；设置窗口可达；配置文件生成）。
 - 改 `ai.c` → 跑 `tests\ai-e2e-test.ps1`（右键→AI 分析全链路，需 kilo 已登录，
