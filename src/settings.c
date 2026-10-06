@@ -20,6 +20,7 @@ static const WCHAR SETTINGS_CLASS[] = L"KptSettingsDlg";
 
 static HWND s_dlg;
 static HWND s_chkAutostart, s_chkStartMin, s_chkAutoEn, s_chkBalloon;
+static HWND s_chkOrphanEn, s_edOrphanIv, s_udOrphanIv, s_chkOrphanNp;
 static HWND s_rdAuto, s_rdLight, s_rdDark, s_edInterval, s_btnClose, s_udInterval;
 static BOOL s_loading = FALSE; /* 载入初值时屏蔽 EN_CHANGE 回写 */
 static int s_dpi = 96;        /* 本窗口 DPI（跨屏时独立于主窗口更新） */
@@ -50,6 +51,12 @@ static void LoadValues(void)
                  ConfigGetBool(L"BalloonNotify", TRUE) ? BST_CHECKED : BST_UNCHECKED, 0);
     StringCchPrintfW(buf, 16, L"%ld", ConfigGetLong(L"AutoRefreshInterval", 10));
     SetWindowTextW(s_edInterval, buf);
+    SendMessageW(s_chkOrphanEn, BM_SETCHECK,
+                 ConfigGetBool(L"OrphanAutoEnable", FALSE) ? BST_CHECKED : BST_UNCHECKED, 0);
+    StringCchPrintfW(buf, 16, L"%ld", ConfigGetLong(L"OrphanIntervalMin", 30));
+    SetWindowTextW(s_edOrphanIv, buf);
+    SendMessageW(s_chkOrphanNp, BM_SETCHECK,
+                 ConfigGetBool(L"OrphanNodePyOnly", TRUE) ? BST_CHECKED : BST_UNCHECKED, 0);
     {
         ThemeMode m = ThemeGetMode();
         SendMessageW(s_rdAuto, BM_SETCHECK, m == THEME_AUTO ? BST_CHECKED : BST_UNCHECKED, 0);
@@ -73,8 +80,19 @@ static void Layout(void)
     MoveWindow(s_chkAutoEn, pad + SC(4), SC(284), SC(110), lineH, TRUE);
     MoveWindow(s_edInterval, pad + SC(130), SC(284), SC(64), lineH - SC(2), TRUE);
     MoveWindow(s_udInterval, pad + SC(130) + SC(64), SC(284), SC(20), lineH - SC(2), TRUE);
-    MoveWindow(s_chkBalloon, pad + SC(4), SC(340), SC(340), lineH, TRUE);
-    MoveWindow(s_btnClose, SC(330), SC(396), SC(90), SC(30), TRUE);
+    /* 孤儿进程清理区 */
+    MoveWindow(s_chkOrphanEn, pad + SC(4), SC(364), SC(180), lineH, TRUE);
+    MoveWindow(s_edOrphanIv, pad + SC(230), SC(364), SC(64), lineH - SC(2), TRUE);
+    MoveWindow(s_udOrphanIv, pad + SC(230) + SC(64), SC(364), SC(20), lineH - SC(2), TRUE);
+    MoveWindow(s_chkOrphanNp, pad + SC(4), SC(364) + lineH, SC(360), lineH, TRUE);
+    MoveWindow(s_chkBalloon, pad + SC(4), SC(504), SC(360), lineH, TRUE);
+    MoveWindow(s_btnClose, SC(330), SC(560), SC(90), SC(30), TRUE);
+    /* AI 推荐按钮 */
+    {
+        HWND btnAi = GetDlgItem(s_dlg, IDC_SET_AI_RECOMMEND);
+        if (btnAi)
+            MoveWindow(btnAi, pad + SC(4), SC(600), SC(120), SC(30), TRUE);
+    }
 }
 
 static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
@@ -174,8 +192,34 @@ static LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             ConfigSetBool(L"BalloonNotify",
                           SendMessageW(s_chkBalloon, BM_GETCHECK, 0, 0) == BST_CHECKED);
             break;
+        case IDC_SET_ORPHANEN:
+            ConfigSetBool(L"OrphanAutoEnable",
+                          SendMessageW(s_chkOrphanEn, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            GuiApplySettings(); /* 重挂/摘除定时器 */
+            break;
+        case IDC_SET_ORPHANIV:
+            if (HIWORD(wp) == EN_CHANGE) {
+                WCHAR obuf[16];
+                LONG ov;
+                GetWindowTextW(s_edOrphanIv, obuf, 16);
+                ov = _wtol(obuf);
+                if (ov < 1)
+                    ov = 1;
+                if (ov > 1440)
+                    ov = 1440;
+                ConfigSetLong(L"OrphanIntervalMin", ov);
+                GuiApplySettings();
+            }
+            break;
+        case IDC_SET_ORPHANNP:
+            ConfigSetBool(L"OrphanNodePyOnly",
+                          SendMessageW(s_chkOrphanNp, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            break;
         case IDC_SET_CLOSE:
             DestroyWindow(hwnd);
+            break;
+        case IDC_SET_AI_RECOMMEND:
+            ActionsAiConfigRecommend(hwnd);
             break;
         default:
             break;
@@ -248,7 +292,7 @@ void SettingsShow(void)
         }
         s_dlg = CreateWindowExW(0, SETTINGS_CLASS, L"设置",
                                 WS_OVERLAPPEDWINDOW & ~(WS_MAXIMIZEBOX | WS_THICKFRAME),
-                                x, y, SC(440), SC(480),
+                                x, y, SC(440), SC(680),
                                 g_app.hMain, NULL, g_app.hInst, NULL);
     }
     if (!s_dlg)
@@ -294,7 +338,29 @@ void SettingsShow(void)
     SendMessageW(s_udInterval, UDM_SETBUDDY, (WPARAM)s_edInterval, 0);
     SendMessageW(s_udInterval, UDM_SETRANGE32, 3, 3600);
     CreateLabel(s_dlg, L"秒（3~3600）", pad + SC(204), SC(286), SC(140), FALSE);
-    CreateLabel(s_dlg, L"▎通知", pad, SC(316), SC(200), TRUE);
+    /* 孤儿进程清理 */
+    CreateLabel(s_dlg, L"▎孤儿进程清理", pad, SC(332), SC(200), TRUE);
+    s_chkOrphanEn = CreateWindowExW(0, L"BUTTON", L"定时自动清理",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                    0, 0, SC(180), SC(28),
+                                    s_dlg, (HMENU)(INT_PTR)IDC_SET_ORPHANEN, g_app.hInst, NULL);
+    s_edOrphanIv = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"30",
+                                   WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER,
+                                   0, 0, SC(64), SC(26),
+                                   s_dlg, (HMENU)(INT_PTR)IDC_SET_ORPHANIV, g_app.hInst, NULL);
+    s_udOrphanIv = CreateWindowExW(0, UPDOWN_CLASSW, NULL,
+                                   WS_CHILD | WS_VISIBLE | UDS_SETBUDDYINT |
+                                       UDS_ALIGNRIGHT | UDS_ARROWKEYS | UDS_NOTHOUSANDS,
+                                   0, 0, SC(20), SC(26),
+                                   s_dlg, NULL, g_app.hInst, NULL);
+    SendMessageW(s_udOrphanIv, UDM_SETBUDDY, (WPARAM)s_edOrphanIv, 0);
+    SendMessageW(s_udOrphanIv, UDM_SETRANGE32, 1, 1440);
+    CreateLabel(s_dlg, L"分钟（1~1440）", pad + SC(304), SC(366), SC(130), FALSE);
+    s_chkOrphanNp = CreateWindowExW(0, L"BUTTON", L"仅清理 Node/Python 进程（推荐）",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                    0, 0, SC(360), SC(28),
+                                    s_dlg, (HMENU)(INT_PTR)IDC_SET_ORPHANNP, g_app.hInst, NULL);
+    CreateLabel(s_dlg, L"▎通知", pad, SC(472), SC(200), TRUE);
     s_chkBalloon = CreateWindowExW(0, L"BUTTON", L"显示气泡通知（清理/复制/自启等结果提示）",
                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
                                    0, 0, SC(360), SC(28),
@@ -303,9 +369,20 @@ void SettingsShow(void)
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                  0, 0, SC(90), SC(30),
                                  s_dlg, (HMENU)(INT_PTR)IDC_SET_CLOSE, g_app.hInst, NULL);
+    CreateLabel(s_dlg, L"▎AI", pad, SC(570), SC(200), TRUE);
+    {
+        HWND btnAi = CreateWindowExW(0, L"BUTTON", L"AI 推荐配置",
+                                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                     0, 0, SC(120), SC(30),
+                                     s_dlg, (HMENU)(INT_PTR)IDC_SET_AI_RECOMMEND,
+                                     g_app.hInst, NULL);
+        if (g_app.hFont)
+            SendMessageW(btnAi, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+    }
 
     HWND ctrls[] = { s_chkAutostart, s_chkStartMin, s_rdAuto, s_rdLight, s_rdDark,
-                     s_chkAutoEn, s_edInterval, s_chkBalloon, s_btnClose };
+                     s_chkAutoEn, s_edInterval, s_chkBalloon, s_btnClose,
+                     s_chkOrphanEn, s_edOrphanIv, s_chkOrphanNp };
     for (size_t i = 0; i < sizeof(ctrls) / sizeof(ctrls[0]); i++)
         if (ctrls[i] && g_app.hFont)
             SendMessageW(ctrls[i], WM_SETFONT, (WPARAM)g_app.hFont, TRUE);

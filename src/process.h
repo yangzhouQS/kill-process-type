@@ -25,6 +25,7 @@ typedef struct {
     WCHAR path[MAX_PATH];  /* 完整可执行路径，获取失败为空串 */
     WCHAR cmdline[208];    /* 完整命令行（仅 node/python 采集，peb.c；其余为空串） */
     RiskLevel aiRisk;      /* AI 风险等级（WP3 批量扫描填充，默认 UNKNOWN） */
+    WCHAR project[MAX_PATH]; /* 项目根目录（WP8：仅 node/python，peb+project.c；其余空串） */
     unsigned long long memBytes; /* 工作集大小，失败为 0 */
     ProcType type;
 } ProcInfo;

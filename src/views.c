@@ -38,6 +38,15 @@ static const ColDef kColsProcTree[] = {
     { L"类型",            80 },
     { L"可执行路径",     380 },
 };
+static const ColDef kColsProcProject[] = {
+    { L"项目 / 进程名",  300 },
+    { L"PID",             70 },
+    { L"父PID",           70 },
+    { L"内存",            90 },
+    { L"类型",            80 },
+    { L"命令行",         380 },
+    { L"AI风险",          70 },
+};
 static const ColDef kColsProcCmd[] = {
     { L"进程名",     170 },
     { L"PID",         70 },
@@ -92,6 +101,9 @@ void ViewsSetColumns(void)
     } else if (g_app.mode == MODE_ALL && g_app.treeMode) {
         cols = kColsProcTree;
         nCols = (int)(sizeof(kColsProcTree) / sizeof(kColsProcTree[0]));
+    } else if (g_app.mode == MODE_PROC && g_app.projectMode) {
+        cols = kColsProcProject; /* WP8: 项目分组视图 */
+        nCols = (int)(sizeof(kColsProcProject) / sizeof(kColsProcProject[0]));
     } else if (g_app.mode == MODE_PROC) {
         cols = kColsProcCmd; /* Node/Python 视图带命令行列 */
         nCols = (int)(sizeof(kColsProcCmd) / sizeof(kColsProcCmd[0]));
@@ -688,7 +700,125 @@ void ViewsRebuild(void)
         /* 全部进程 / Node-Python 视图共用行渲染 */
         BOOL tree = (g_app.mode == MODE_ALL && g_app.treeMode);
         BOOL cmdCol = (g_app.mode == MODE_PROC); /* Node/Python 视图第 7 列 */
-        if (tree) {
+        BOOL projMode = (g_app.mode == MODE_PROC && g_app.projectMode);
+        if (projMode) {
+            /* WP8: 项目分组模式——按 project 字段分组渲染 */
+            /* 收集项目根列表 → 每个项目下列出其进程 → 未识别单列 */
+            typedef struct { const WCHAR *root; int count; } ProjEntry;
+            ProjEntry projList[64];
+            int projCount = 0;
+
+            /* 先统计项目 */
+            for (size_t i = 0; i < g_app.procs.count; i++) {
+                ProcInfo *p = &g_app.procs.items[i];
+                if (p->type == PT_NONE)
+                    continue;
+                if (!NameMatch(p->name, filter) && filter[0])
+                    continue;
+                const WCHAR *root = p->project[0] ? p->project : NULL;
+                BOOL found = FALSE;
+                for (int j = 0; j < projCount; j++)
+                    if ((root == NULL && projList[j].root == NULL) ||
+                        (root && projList[j].root && wcscmp(root, projList[j].root) == 0)) {
+                        projList[j].count++;
+                        found = TRUE;
+                        break;
+                    }
+                if (!found && projCount < 64) {
+                    projList[projCount].root = root;
+                    projList[projCount].count = 1;
+                    projCount++;
+                }
+            }
+
+            /* 渲染：项目根行 + 子进程行 */
+            for (int j = 0; j < projCount; j++) {
+                WCHAR pid[16], ppid[16], mem[32];
+                LVITEMW lvi;
+                int idx;
+
+                /* 项目根行 */
+                {
+                    const WCHAR *rootName = projList[j].root;
+                    WCHAR display[MAX_PATH + 16];
+                    if (!rootName)
+                        StringCchCopyW(display, MAX_PATH + 16, L"▾ 未识别项目");
+                    else {
+                        /* 取目录最后一段作为显示名 */
+                        const WCHAR *lastSlash = wcsrchr(rootName, L'\\');
+                        StringCchPrintfW(display, MAX_PATH + 16, L"▾ %ls（%d）",
+                                         lastSlash ? lastSlash + 1 : rootName,
+                                         projList[j].count);
+                    }
+                    ZeroMemory(&lvi, sizeof(lvi));
+                    lvi.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
+                    lvi.iItem = row++;
+                    lvi.pszText = display;
+                    lvi.lParam = 0; /* 项目根行无 PID */
+                    lvi.iImage = -1;
+                    idx = ListView_InsertItem(g_app.hList, &lvi);
+                    if (idx >= 0) {
+                        ListView_SetItemText(g_app.hList, idx, 1, (LPWSTR)L"-");
+                        ListView_SetItemText(g_app.hList, idx, 2, (LPWSTR)L"-");
+                        ListView_SetItemText(g_app.hList, idx, 3, (LPWSTR)L"-");
+                        ListView_SetItemText(g_app.hList, idx, 4, (LPWSTR)L"项目");
+                        ListView_SetItemText(g_app.hList, idx, 5,
+                                             (LPWSTR)(rootName ? rootName : L"-"));
+                        ListView_SetItemText(g_app.hList, idx, 6, (LPWSTR)L"—");
+                    }
+                    shown++;
+                }
+
+                /* 子进程行 */
+                for (size_t i = 0; i < g_app.procs.count; i++) {
+                    ProcInfo *p = &g_app.procs.items[i];
+                    const WCHAR *root;
+
+                    if (p->type == PT_NONE)
+                        continue;
+                    if (!NameMatch(p->name, filter) && filter[0])
+                        continue;
+                    root = p->project[0] ? p->project : NULL;
+                    if ((root == NULL && projList[j].root != NULL) ||
+                        (root != NULL && projList[j].root == NULL))
+                        continue;
+                    if (root && projList[j].root && wcscmp(root, projList[j].root) != 0)
+                        continue;
+
+                    StringCchPrintfW(pid, 16, L"%lu", (unsigned long)p->pid);
+                    StringCchPrintfW(ppid, 16, L"%lu", (unsigned long)p->ppid);
+                    FormatMem(p->memBytes, mem, 32);
+                    {
+                        WCHAR name[128];
+                        StringCchCopyW(name, 128, L"    ");
+                        StringCchCatNW(name, 128, p->name, 64);
+                        ZeroMemory(&lvi, sizeof(lvi));
+                        lvi.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
+                        lvi.iItem = row++;
+                        lvi.pszText = name;
+                        lvi.lParam = (LPARAM)(INT_PTR)p->pid;
+                        lvi.iImage = GetIconIndex(p->path);
+                        idx = ListView_InsertItem(g_app.hList, &lvi);
+                        if (idx >= 0) {
+                            ListView_SetItemText(g_app.hList, idx, 1, pid);
+                            ListView_SetItemText(g_app.hList, idx, 2, ppid);
+                            ListView_SetItemText(g_app.hList, idx, 3, mem);
+                            ListView_SetItemText(g_app.hList, idx, 4,
+                                (LPWSTR)ProcTypeLabel(p->type));
+                            ListView_SetItemText(g_app.hList, idx, 5,
+                                p->cmdline[0] ? p->cmdline : (LPWSTR)L"-");
+                            ListView_SetItemText(g_app.hList, idx, 6,
+                                (LPWSTR)(p->aiRisk == RISK_HIGH ? L"高"
+                                    : (p->aiRisk == RISK_MED ? L"中"
+                                    : (p->aiRisk == RISK_LOW ? L"低" : L"—"))));
+                        }
+                        shown++;
+                        if (p->type == PT_NODE) nNode++;
+                        else nPy++;
+                    }
+                }
+            }
+        } else if (tree) {
             /* 树形模式：DFS 展开（父在前子紧随），折叠子树整体隐藏。
              * 支持列排序：兄弟节点按当前排序列排序（内存列 = 子树合计）。 */
             int n = (int)g_app.procs.count;

@@ -152,6 +152,15 @@ UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\c
 
 ## 8. 更新日志
 
+- **v6.0（2026-10-06）**：v6.0 两项——
+  **WP8 项目分组 UI**——Node/Python 页签新增「项目」复选框（持久化
+  ProjectView 配置）；快照采集时对 node/python 进程调 GetProcessProject
+  填充 ProcInfo.project；项目分组模式：按项目根分组渲染（项目根行
+  ▾ 名称+计数 → 子进程缩进行），未识别项目单列；列表显示命令行列。
+  **WP10 AI 推荐配置**——设置窗口新增「AI 推荐」区块与按钮；采集
+  统计（终止日志总数/孤儿清理次数/失败次数/当前配置快照）→ kilo
+  分析 → AI 报告窗口展示推荐清单（JSON 格式 key/value/reason）。
+  同时 v5.3 底座已含 WP6 monitor.c/h（时序采集）+ WP8 project.c/h。
 - **v5.3（2026-10-06）**：v5.2 修补 + v6.0 底座——
   **/ai-query 上下文修复**（按内存降序取前 30，优先含 node/python）；
   **诊断动作按钮**（解析 ACTIONS: JSON → 动态创建 clean_orphans/

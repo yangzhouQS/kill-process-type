@@ -31,6 +31,7 @@
 #define IDC_BTN_AI_LOG    2011
 #define IDC_BTN_AI_BATCH  2012
 #define IDC_BTN_AI_DIAG   2013
+#define IDC_CHK_PROJECT   2014
 
 /* 列表行右键菜单命令 */
 #define IDM_LIST_COPY_PATH  2101
@@ -57,6 +58,7 @@
 #define IDC_SET_AUTOIV      2307
 #define IDC_SET_BALLOON     2308
 #define IDC_SET_CLOSE       2309
+#define IDC_SET_AI_RECOMMEND 2313
 
 /* 设置窗口：孤儿进程清理 */
 #define IDC_SET_ORPHANEN  2310

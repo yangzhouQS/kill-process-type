@@ -43,6 +43,7 @@ static HWND g_hChkTree;
 static HWND g_hBtnAiLog; /* WP2: 日志复盘按钮（仅日志页签可见） */
 static HWND g_hBtnAiBatch; /* WP3: 批量风险扫描按钮 */
 static HWND g_hBtnAiDiag;  /* WP5: AI 诊断按钮 */
+static HWND g_hChkProject; /* WP8: 项目分组复选框（仅 Node/Python 页签） */
 
 /* 主窗口全部控件的主题应用（启动与热切换时调用） */
 static void ApplyThemeAll(void)
@@ -144,8 +145,10 @@ static void Layout(HWND hwnd)
         MoveWindow(g_app.hTab, pad, y2, AppScale(320), btnH, TRUE);
     if (g_hChkTree)
         MoveWindow(g_hChkTree, pad + AppScale(328), y2, AppScale(56), btnH, TRUE);
+    if (g_hChkProject)
+        MoveWindow(g_hChkProject, pad + AppScale(390), y2, AppScale(56), btnH, TRUE);
     if (g_hBtnAiLog)
-        MoveWindow(g_hBtnAiLog, pad + AppScale(392), y2, AppScale(120), btnH, TRUE);
+        MoveWindow(g_hBtnAiLog, pad + AppScale(454), y2, AppScale(120), btnH, TRUE);
     if (g_hBtnAiBatch)
         MoveWindow(g_hBtnAiBatch, pad + AppScale(520), y2, AppScale(110), btnH, TRUE);
     if (g_app.hEditFilter) {
@@ -266,6 +269,17 @@ static void CreateControls(HWND hwnd)
                                    g_app.hInst, NULL);
     if (g_app.hFont)
         SendMessageW(g_hBtnAiDiag, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+
+    /* WP8: 项目分组复选框（Node/Python 页签） */
+    g_hChkProject = CreateWindowExW(0, L"BUTTON", L"项目",
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                    0, 0, AppScale(56), AppScale(30),
+                                    hwnd, (HMENU)(INT_PTR)IDC_CHK_PROJECT, g_app.hInst, NULL);
+    SendMessageW(g_hChkProject, BM_SETCHECK,
+                 ConfigGetBool(L"ProjectView", FALSE) ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_app.projectMode = ConfigGetBool(L"ProjectView", FALSE);
+    if (g_app.hFont)
+        SendMessageW(g_hChkProject, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
 }
 
 /* ---------------- 消息处理 ---------------- */
@@ -393,6 +407,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (g_hBtnAiDiag)
                     ShowWindow(g_hBtnAiDiag,
                                mode == MODE_DIAG ? SW_SHOW : SW_HIDE);
+                /* WP8: 项目分组复选框仅 Node/Python 页签可见 */
+                if (g_hChkProject)
+                    ShowWindow(g_hChkProject,
+                               mode == MODE_PROC ? SW_SHOW : SW_HIDE);
+                /* 树形复选框仅全部进程页签可见 */
+                if (g_hChkTree)
+                    ShowWindow(g_hChkTree,
+                               mode == MODE_ALL ? SW_SHOW : SW_HIDE);
             }
         }
         else if (hdr && hdr->idFrom == IDC_LIST && hdr->code == LVN_COLUMNCLICK)
@@ -490,6 +512,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_app.mode == MODE_ALL) {
                 g_app.sortCol = -1;
                 g_app.collapsedCount = 0;
+                ViewsSetColumns();
+                ViewsRebuild();
+            }
+            break;
+        case IDC_CHK_PROJECT: /* WP8: 项目分组开关（Node/Python 页签） */
+            g_app.projectMode = SendMessageW(g_hChkProject, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            ConfigSetBool(L"ProjectView", g_app.projectMode);
+            if (g_app.mode == MODE_PROC) {
+                g_app.sortCol = -1;
                 ViewsSetColumns();
                 ViewsRebuild();
             }

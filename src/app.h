@@ -63,7 +63,8 @@ typedef struct {
     SYSTEMTIME lastScan;
     int sortCol;      /* 当前排序列（列头索引），-1 = 未排序（快照顺序） */
     BOOL sortDesc;    /* TRUE = 降序 */
-    BOOL treeMode;    /* 全部进程视图：树形分组模式（按父子链缩进+折叠） */
+    BOOL treeMode;    /* 全部进程视图：树形分组模式 */
+    BOOL projectMode; /* Node/Python 视图：项目分组模式（WP8） */
     DWORD collapsedPids[128]; /* 树形模式已折叠的子树根 PID */
     int collapsedCount;
     LogList logs;     /* 日志视图缓存（klog.c 加载） */

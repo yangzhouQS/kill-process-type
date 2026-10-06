@@ -1727,6 +1727,129 @@ void ActionsDiagCheckPending(WPARAM wp, LPARAM lp)
     }
 }
 
+/* ---------------- WP10: AI 推荐配置 ---------------- */
+
+void ActionsAiConfigRecommend(HWND hwnd)
+{
+    WCHAR context[8192];
+    WCHAR prompt[12288];
+    LogList logs;
+    int orphanCount = 0, failCount = 0;
+
+    (void)hwnd;
+    if (AiBusy())
+        return;
+
+    /* 采集统计数据 */
+    context[0] = L'\0';
+    ZeroMemory(&logs, sizeof(logs));
+    KlogLoad(&logs);
+    for (size_t i = 0; i < logs.count; i++) {
+        if (wcsstr(logs.items[i].source, L"孤儿"))
+            orphanCount++;
+        if (!logs.items[i].ok)
+            failCount++;
+    }
+    KlogFree(&logs);
+
+    StringCchPrintfW(context, 8192,
+        L"工具使用统计：\n"
+        L"- 终止日志总数：%d 条（最近500条内）\n"
+        L"- 孤儿进程清理次数：%d\n"
+        L"- 终止失败次数：%d\n"
+        L"- 当前配置：自动刷新=%ls（间隔%ld秒）、孤儿定时清理=%ls（间隔%ld分钟）、"
+        L"气泡通知=%ls、开机自启=%ls\n"
+        L"请基于以上数据推荐配置优化。只输出JSON数组，格式：\n"
+        L"[{\"key\":\"配置键名\",\"value\":\"推荐值\",\"reason\":\"一句话理由\"}]\n"
+        L"可用键：AutoRefresh,AutoRefreshInterval,OrphanAutoEnable,OrphanIntervalMin,"
+        L"BalloonNotify,StartMinimized",
+        (int)logs.count, orphanCount, failCount,
+        ConfigGetBool(L"AutoRefresh", TRUE) ? L"开" : L"关",
+        ConfigGetLong(L"AutoRefreshInterval", 10),
+        ConfigGetBool(L"OrphanAutoEnable", FALSE) ? L"开" : L"关",
+        ConfigGetLong(L"OrphanIntervalMin", 30),
+        ConfigGetBool(L"BalloonNotify", TRUE) ? L"开" : L"关",
+        ConfigGetBool(L"StartMinimized", FALSE) ? L"开" : L"关");
+
+    StringCchPrintfW(prompt, 12288,
+        L"你是Windows工具配置优化专家。%ls", context);
+
+    /* 打开 AI 报告窗口显示推荐 */
+    free(s_aiPrompt);
+    s_aiPrompt = NULL;
+    {
+        size_t plen = (size_t)lstrlenW(prompt) + 1;
+        s_aiPrompt = (WCHAR *)malloc(plen * sizeof(WCHAR));
+        if (s_aiPrompt)
+            StringCchCopyW(s_aiPrompt, plen, prompt);
+    }
+    if (s_aiDlg)
+        DestroyWindow(s_aiDlg);
+    {
+        WNDCLASSEXW wc;
+        static BOOL registered = FALSE;
+        if (!registered) {
+            ZeroMemory(&wc, sizeof(wc));
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = AiDlgProc;
+            wc.hInstance = g_app.hInst;
+            wc.hIcon = LoadIconW(g_app.hInst, MAKEINTRESOURCEW(IDI_APP));
+            wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+            wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+            wc.lpszClassName = AI_DLG_CLASS;
+            if (RegisterClassExW(&wc))
+                registered = TRUE;
+        }
+    }
+    s_aiPid = 0;
+    {
+        int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+        if (g_app.hMain) {
+            RECT rm;
+            GetWindowRect(g_app.hMain, &rm);
+            x = rm.left + AppScale(80);
+            y = rm.top + AppScale(50);
+        }
+        s_aiDlg = CreateWindowExW(0, AI_DLG_CLASS, L"AI 配置推荐",
+                                  WS_OVERLAPPEDWINDOW,
+                                  x, y, AppScale(560), AppScale(440),
+                                  g_app.hMain, NULL, g_app.hInst, NULL);
+    }
+    if (!s_aiDlg)
+        return;
+    s_aiKillBtn = CreateWindowExW(0, L"BUTTON", L"终止该进程",
+                                  WS_CHILD | BS_PUSHBUTTON,
+                                  0, 0, AppScale(130), AppScale(30),
+                                  s_aiDlg, (HMENU)(INT_PTR)IDAI_KILL, g_app.hInst, NULL);
+    EnableWindow(s_aiKillBtn, FALSE);
+    s_aiStatus = CreateWindowExW(0, L"STATIC",
+                                 L"AI 分析使用数据中…（约 40~90 秒）",
+                                 WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+                                 0, 0, AppScale(300), AppScale(30),
+                                 s_aiDlg, NULL, g_app.hInst, NULL);
+    s_aiEdit = RichTextCreate(s_aiDlg, 0);
+    if (s_aiEdit)
+        SetWindowTextW(s_aiEdit,
+            L"等待 kilo 返回…\r\n\r\n分析完成后将在此展示推荐配置项。");
+    if (g_app.hFont) {
+        SendMessageW(s_aiEdit, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        SendMessageW(s_aiStatus, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        SendMessageW(s_aiKillBtn, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+    }
+    ShowWindow(s_aiDlg, SW_SHOW);
+    UpdateWindow(s_aiDlg);
+    AiDlgLayout(s_aiDlg);
+    ThemeApplyFrame(s_aiDlg);
+    InvalidateRect(s_aiDlg, NULL, TRUE);
+    s_aiStartTick = GetTickCount64();
+    SetTimer(s_aiDlg, AI_DLG_TIMER, 1000, NULL);
+    if (!AiStartAnalysis(g_app.hMain, prompt)) {
+        KillTimer(s_aiDlg, AI_DLG_TIMER);
+        s_aiStartTick = 0;
+        SetWindowTextW(s_aiStatus, L"启动分析失败。");
+    }
+}
+
 void ActionsAiMenuCommand(HWND hwnd)
 {
     (void)hwnd;
