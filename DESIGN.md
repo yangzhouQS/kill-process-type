@@ -152,6 +152,17 @@ UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\c
 
 ## 8. 更新日志
 
+- **v5.3（2026-10-06）**：v5.2 修补 + v6.0 底座——
+  **/ai-query 上下文修复**（按内存降序取前 30，优先含 node/python）；
+  **诊断动作按钮**（解析 ACTIONS: JSON → 动态创建 clean_orphans/
+  fix_winnat 按钮，最多 5 个）；
+  **WP6 monitor.c/h**（时序采集底座：环形缓冲 MONITOR_SLOTS=60 × 2s =
+  2 分钟窗口，MONITOR_MAX_PIDS=64 LRU 淘汰；独立采样线程 GetProcessTimes
+  差分 CPU% + GetProcessMemoryInfo 工作集；MonitorStart/Stop/Add/Remove/
+  GetSeries API，P2 异常监控的地基）；
+  **WP8 project.c/h**（项目根识别：FindProjectRoot 从 PEB cwd 向上 3 级
+  探测 package.json/pyproject.toml/requirements.txt；GetProcessProject
+  按 PID 取项目归属；纯本地无 AI）。
 - **v5.2.1（2026-10-06）**：v5.2 收尾——WP5 核心功能补全
   （DiagBuildContext 六源快照组装→kilo→四区块报告渲染→导出 .md，
   GetSaveFileNameW 对话框+UTF-8 写盘）；诊断结果路由

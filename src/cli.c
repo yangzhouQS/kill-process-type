@@ -565,8 +565,21 @@ static int CmdAiQuery(const WCHAR *args)
     npl = ScanAllProcesses(&l);
     ScanListenPorts(&nl);
     {
-        /* 进程摘要（Top 30） */
-        StringCchCatW(context, 16384, L"Processes:\n");
+        /* v5.3 fix: 按内存降序取前 30（优先含 node/python），而非快照顺序 */
+        /* 选择排序前 30 */
+        for (int rank = 0; rank < 30 && rank < npl; rank++) {
+            size_t maxIdx = (size_t)rank;
+            for (size_t j = rank + 1; j < l.count; j++)
+                if (l.items[j].memBytes > l.items[maxIdx].memBytes)
+                    maxIdx = j;
+            if (maxIdx != (size_t)rank) {
+                ProcInfo t = l.items[rank];
+                l.items[rank] = l.items[maxIdx];
+                l.items[maxIdx] = t;
+            }
+        }
+        /* 进程摘要（Top 30 按内存） */
+        StringCchCatW(context, 16384, L"Processes (top 30 by memory):\n");
         for (int i = 0; i < npl && i < 30; i++) {
             WCHAR line[512];
             StringCchPrintfW(line, 512, L"%lu\t%ls\t%luKB\t%ls\t%ls\n",

@@ -1462,6 +1462,53 @@ static void DiagApplyResult(AiResult *r)
             SetWindowTextW(s_diagEdit, r->answer);
         }
         TrayShowBalloon(MAIN_WINDOW_TITLE, L"AI 全局诊断完成。");
+
+        /* 解析 ACTIONS:[...] 生成动态按钮 */
+        {
+            const WCHAR *acts = wcsstr(r->answer, L"ACTIONS:");
+            if (acts) {
+                WCHAR *json = AiExtractJson(acts + 8);
+                if (json) {
+                    int btnY = 0;
+                    const WCHAR *p = json;
+                    while (p && *p && btnY < 5) {
+                        const WCHAR *actPos = wcsstr(p, L"\"action\":\"");
+                        if (!actPos)
+                            break;
+                        {
+                            const WCHAR *q = actPos + 10;
+                            WCHAR action[64] = {0};
+                            int ai2 = 0;
+                            while (*q && *q != L'"' && ai2 < 63)
+                                action[ai2++] = *q++;
+                            if (wcscmp(action, L"clean_orphans") == 0) {
+                                HWND b = CreateWindowExW(0, L"BUTTON",
+                                    L"清理孤儿进程",
+                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                    10, 10 + btnY * 35, 140, 30,
+                                    s_diagDlg, (HMENU)(INT_PTR)(100 + btnY),
+                                    g_app.hInst, NULL);
+                                if (g_app.hFont)
+                                    SendMessageW(b, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+                                btnY++;
+                            } else if (wcsncmp(action, L"fix_winnat", 10) == 0) {
+                                HWND b = CreateWindowExW(0, L"BUTTON",
+                                    L"修复 winnat 端口",
+                                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                    10, 10 + btnY * 35, 140, 30,
+                                    s_diagDlg, (HMENU)(INT_PTR)(101 + btnY),
+                                    g_app.hInst, NULL);
+                                if (g_app.hFont)
+                                    SendMessageW(b, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+                                btnY++;
+                            }
+                            p = q;
+                        }
+                    }
+                    free(json);
+                }
+            }
+        }
     } else {
         SetWindowTextW(s_diagStatus, L"诊断失败（kilo 不可用或超时）。");
         SetWindowTextW(s_diagEdit,
