@@ -152,6 +152,18 @@ UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\c
 
 ## 8. 更新日志
 
+- **v6.2（2026-10-06）**：WP7 AI 对话面板完整集成——
+  **多轮上下文**——JSON 消息数组格式（D1 拍板），最近 6 轮环形缓冲
+  （每轮 user+assistant 各 1KB），字符串转义（引号/反斜杠/换行→JSON
+  安全格式）；
+  **系统上下文**——每次注入（D2 拍板）：进程按内存 Top 20 + 端口监听
+  Top 20，附带工具角色设定，AiTruncateContext 限 8KB；
+  **AI 调用链路**——ChatSendMessage → ChatBuildPrompt（30KB 上限）→
+  AiStartAnalysis → s_chatPending → ActionsChatCheckPending →
+  ChatHistoryPush（闭环）；
+  **UI**——工具栏「AI 对话」按钮；侧边面板含发送/清空按钮；显示区
+  自动滚动到底部；等待/A 错误状态内联展示；
+  **入口**——工具栏按钮 IDC_BTN_CHAT（始终可见）。
 - **v6.1（2026-10-06）**：P2 全部三项 + P1 对话面板框架——
   **WP11 时序异常告警**——MonitorStart 启动采样线程；自动刷新时注册
   node/python PID 到时序监控（AnomalyWatch 配置开关）；ActionsAnomalyCheck

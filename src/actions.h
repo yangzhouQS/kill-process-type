@@ -79,4 +79,7 @@ void ActionsCompareBaseline(HWND hwnd);
 /* WP7: AI 对话面板（显示/隐藏切换） */
 void ChatPanelToggle(HWND mainHwnd);
 
+/* WP7: 对话结果路由（WM_APP_AI_DONE 时检查 pending 并派发） */
+void ActionsChatCheckPending(WPARAM wp, LPARAM lp);
+
 #endif

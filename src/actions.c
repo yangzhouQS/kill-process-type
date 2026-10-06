@@ -2350,11 +2350,265 @@ void ActionsCompareBaseline(HWND hwnd)
     MessageBoxW(NULL, report, L"基线对比", MB_OK | MB_ICONINFORMATION);
 }
 
-/* ---------------- WP7: AI 对话面板 ---------------- */
+/* ---------------- WP7: AI 对话面板（含 AI 调用集成） ---------------- */
+
+#define CHAT_MAX_TURNS 6
+#define CHAT_TURN_MAX  1024
+
+typedef struct {
+    WCHAR user[CHAT_TURN_MAX];
+    WCHAR assistant[CHAT_TURN_MAX];
+} ChatTurn;
 
 static HWND s_chatPanel;
-static HWND s_chatInput, s_chatDisplay, s_chatSend;
+static HWND s_chatInput, s_chatDisplay, s_chatSend, s_chatClear;
 static BOOL s_chatVisible = FALSE;
+static BOOL s_chatPending = FALSE;
+static ChatTurn s_chatHistory[CHAT_MAX_TURNS];
+static int s_chatTurnCount = 0;
+static WCHAR s_lastUserMsg[CHAT_TURN_MAX]; /* 暂存最近一条用户输入 */
+
+static void ChatHistoryPush(const WCHAR *user, const WCHAR *assistant)
+{
+    if (s_chatTurnCount < CHAT_MAX_TURNS) {
+        StringCchCopyNW(s_chatHistory[s_chatTurnCount].user, CHAT_TURN_MAX,
+                        user ? user : L"", CHAT_TURN_MAX);
+        StringCchCopyNW(s_chatHistory[s_chatTurnCount].assistant, CHAT_TURN_MAX,
+                        assistant ? assistant : L"", CHAT_TURN_MAX);
+        s_chatTurnCount++;
+    } else {
+        /* 环形：丢最旧，整体前移 */
+        memmove(&s_chatHistory[0], &s_chatHistory[1],
+                (CHAT_MAX_TURNS - 1) * sizeof(ChatTurn));
+        StringCchCopyNW(s_chatHistory[CHAT_MAX_TURNS - 1].user, CHAT_TURN_MAX,
+                        user ? user : L"", CHAT_TURN_MAX);
+        StringCchCopyNW(s_chatHistory[CHAT_MAX_TURNS - 1].assistant, CHAT_TURN_MAX,
+                        assistant ? assistant : L"", CHAT_TURN_MAX);
+    }
+}
+
+static void ChatHistoryClear(void)
+{
+    s_chatTurnCount = 0;
+    ZeroMemory(s_chatHistory, sizeof(s_chatHistory));
+}
+
+/* 构建系统上下文（D2：每次注入进程+端口 Top 20） */
+static void ChatBuildSystemContext(WCHAR *buf, size_t cch)
+{
+    ProcList l;
+    NetList nl;
+
+    buf[0] = L'\0';
+    StringCchCatW(buf, cch,
+        L"你是Windows进程管理助手（kill-process-type内置对话）。"
+        L"回答简洁中文，可直接给PID/端口数字。\n\n"
+        L"当前系统快照：\n");
+
+    ZeroMemory(&l, sizeof(l));
+    ZeroMemory(&nl, sizeof(nl));
+    ScanAllProcesses(&l);
+    ScanListenPorts(&nl);
+
+    StringCchCatW(buf, cch, L"进程（按内存Top 20）：\n");
+    for (int i = 0; i < 20 && i < (int)l.count; i++) {
+        WCHAR line[256];
+        StringCchPrintfW(line, 256, L"  %lu %ls %luKB %ls\n",
+                         (unsigned long)l.items[i].pid, l.items[i].name,
+                         (unsigned long)(l.items[i].memBytes >> 10),
+                         l.items[i].type == PT_NODE ? L"[node]"
+                             : (l.items[i].type == PT_PYTHON ? L"[python]" : L""));
+        StringCchCatW(buf, cch, line);
+    }
+    StringCchCatW(buf, cch, L"\n端口监听（Top 20）：\n");
+    for (size_t i = 0; i < nl.count && i < 20; i++) {
+        WCHAR line[128];
+        StringCchPrintfW(line, 128, L"  %lu %ls pid=%lu\n",
+                         (unsigned long)nl.items[i].port,
+                         nl.items[i].tcp ? L"TCP" : L"UDP",
+                         (unsigned long)nl.items[i].pid);
+        StringCchCatW(buf, cch, line);
+    }
+    FreeProcList(&l);
+    FreeNetList(&nl);
+    AiTruncateContext(buf, 8000);
+}
+
+/* 构建完整 Prompt（D1：JSON 消息数组格式） */
+static void ChatBuildPrompt(const WCHAR *question, WCHAR *prompt, size_t cch)
+{
+    WCHAR sysCtx[8192];
+    size_t pos = 0;
+
+    ChatBuildSystemContext(sysCtx, 8192);
+
+    /* JSON 格式：{"messages":[{"role":"system","content":"..."},
+       {"role":"user","content":"..."},{"role":"assistant","content":"..."},
+       ...,{"role":"user","content":"当前问题"}]} */
+    pos += StringCchPrintfW(prompt + pos, cch - pos,
+                            L"{\"messages\":[");
+    /* system 消息 */
+    pos += StringCchPrintfW(prompt + pos, cch - pos,
+                            L"{\"role\":\"system\",\"content\":\"");
+    /* 转义系统上下文中的引号和反斜杠 */
+    {
+        const WCHAR *p = sysCtx;
+        while (*p && pos < cch - 100) {
+            if (*p == L'"') {
+                prompt[pos++] = L'\\';
+                prompt[pos++] = L'"';
+            } else if (*p == L'\\') {
+                prompt[pos++] = L'\\';
+                prompt[pos++] = L'\\';
+            } else if (*p == L'\n') {
+                prompt[pos++] = L'\\';
+                prompt[pos++] = L'n';
+            } else {
+                prompt[pos++] = *p;
+            }
+            p++;
+        }
+        prompt[pos] = L'\0';
+    }
+    pos += StringCchPrintfW(prompt + pos, cch - pos, L"\"}");
+
+    /* 历史消息 */
+    for (int i = 0; i < s_chatTurnCount && pos < cch - 2048; i++) {
+        /* user */
+        pos += StringCchPrintfW(prompt + pos, cch - pos,
+                                L",{\"role\":\"user\",\"content\":\"");
+        {
+            const WCHAR *p = s_chatHistory[i].user;
+            while (*p && pos < cch - 1024) {
+                if (*p == L'"') { prompt[pos++] = L'\\'; prompt[pos++] = L'"'; }
+                else if (*p == L'\\') { prompt[pos++] = L'\\'; prompt[pos++] = L'\\'; }
+                else if (*p == L'\n') { prompt[pos++] = L'\\'; prompt[pos++] = L'n'; }
+                else prompt[pos++] = *p;
+                p++;
+            }
+            prompt[pos] = L'\0';
+        }
+        pos += StringCchPrintfW(prompt + pos, cch - pos, L"\"}");
+        /* assistant */
+        pos += StringCchPrintfW(prompt + pos, cch - pos,
+                                L",{\"role\":\"assistant\",\"content\":\"");
+        {
+            const WCHAR *p = s_chatHistory[i].assistant;
+            while (*p && pos < cch - 1024) {
+                if (*p == L'"') { prompt[pos++] = L'\\'; prompt[pos++] = L'"'; }
+                else if (*p == L'\\') { prompt[pos++] = L'\\'; prompt[pos++] = L'\\'; }
+                else if (*p == L'\n') { prompt[pos++] = L'\\'; prompt[pos++] = L'n'; }
+                else prompt[pos++] = *p;
+                p++;
+            }
+            prompt[pos] = L'\0';
+        }
+        pos += StringCchPrintfW(prompt + pos, cch - pos, L"\"}");
+    }
+
+    /* 当前 user 消息 */
+    pos += StringCchPrintfW(prompt + pos, cch - pos,
+                            L",{\"role\":\"user\",\"content\":\"");
+    {
+        const WCHAR *p = question;
+        while (*p && pos < cch - 64) {
+            if (*p == L'"') { prompt[pos++] = L'\\'; prompt[pos++] = L'"'; }
+            else if (*p == L'\\') { prompt[pos++] = L'\\'; prompt[pos++] = L'\\'; }
+            else if (*p == L'\n') { prompt[pos++] = L'\\'; prompt[pos++] = L'n'; }
+            else prompt[pos++] = *p;
+            p++;
+        }
+        prompt[pos] = L'\0';
+    }
+    pos += StringCchPrintfW(prompt + pos, cch - pos, L"\"}");
+    pos += StringCchPrintfW(prompt + pos, cch - pos, L"]}");
+}
+
+/* 发送消息（ChatProc 内调用） */
+static void ChatSendMessage(void)
+{
+    WCHAR input[2048];
+    WCHAR prompt[32768]; /* 32KB：JSON 格式比纯文本多 ~30% */
+
+    if (s_chatPending)
+        return;
+    GetWindowTextW(s_chatInput, input, 2048);
+    if (!input[0])
+        return;
+
+    /* 显示用户消息 */
+    {
+        WCHAR line[2200];
+        int len;
+        StringCchPrintfW(line, 2200, L"你：%ls\r\n\r\n", input);
+        len = GetWindowTextLengthW(s_chatDisplay);
+        SendMessageW(s_chatDisplay, EM_SETSEL, len, len);
+        SendMessageW(s_chatDisplay, EM_REPLACESEL, FALSE, (LPARAM)line);
+        SendMessageW(s_chatDisplay, EM_SCROLLCARET, 0, 0);
+    }
+
+    ChatBuildPrompt(input, prompt, 32768);
+    AiTruncateContext(prompt, 30000);
+    SetWindowTextW(s_chatInput, L"");
+
+    s_chatPending = TRUE;
+    {
+        WCHAR wait[128];
+        int len;
+        StringCchCopyW(wait, 128, L"AI 思考中…（kilo 无头执行，约 40~90 秒）\r\n\r\n");
+        len = GetWindowTextLengthW(s_chatDisplay);
+        SendMessageW(s_chatDisplay, EM_SETSEL, len, len);
+        SendMessageW(s_chatDisplay, EM_REPLACESEL, FALSE, (LPARAM)wait);
+    }
+
+    if (!AiStartAnalysis(g_app.hMain, prompt)) {
+        s_chatPending = FALSE;
+        {
+            WCHAR err[256];
+            int len;
+            StringCchCopyW(err, 256,
+                L"⚠ AI 调用失败（kilo 不可用或已有任务进行中）。\r\n\r\n");
+            len = GetWindowTextLengthW(s_chatDisplay);
+            SendMessageW(s_chatDisplay, EM_SETSEL, len, len);
+            SendMessageW(s_chatDisplay, EM_REPLACESEL, FALSE, (LPARAM)err);
+        }
+    }
+}
+
+/* 结果路由（gui.c WM_APP_AI_DONE → ActionsChatCheckPending） */
+void ActionsChatCheckPending(WPARAM wp, LPARAM lp)
+{
+    AiResult *r;
+
+    (void)wp;
+    if (!s_chatPending)
+        return;
+    s_chatPending = FALSE;
+    r = (AiResult *)lp;
+    if (!r || !r->answer || !r->answer[0]) {
+        int len = GetWindowTextLengthW(s_chatDisplay);
+        SendMessageW(s_chatDisplay, EM_SETSEL, len, len);
+        SendMessageW(s_chatDisplay, EM_REPLACESEL, FALSE,
+                     (LPARAM)L"⚠ AI 无响应（kilo 超时或异常）。\r\n\r\n");
+        return;
+    }
+    /* 显示 AI 回复 */
+    {
+        WCHAR line[CHAT_TURN_MAX + 64];
+        int len;
+        StringCchPrintfW(line, CHAT_TURN_MAX + 64, L"AI：%ls\r\n\r\n", r->answer);
+        len = GetWindowTextLengthW(s_chatDisplay);
+        SendMessageW(s_chatDisplay, EM_SETSEL, len, len);
+        SendMessageW(s_chatDisplay, EM_REPLACESEL, FALSE, (LPARAM)line);
+        SendMessageW(s_chatDisplay, EM_SCROLLCARET, 0, 0);
+    }
+    /* 存入历史 */
+    ChatHistoryPush(s_lastUserMsg, r->answer);
+    s_lastUserMsg[0] = L'\0';
+}
+
+/* 暂存最近一条用户输入（ChatSendMessage 写入，ChatCheckPending 消费） */
+static WCHAR s_lastUserMsg[CHAT_TURN_MAX];
 
 static void ChatLayout(HWND parent)
 {
@@ -2362,15 +2616,16 @@ static void ChatLayout(HWND parent)
         return;
     {
         RECT rc;
-        int pw = 360; /* 固定宽度面板 */
+        int pw = 360;
         GetClientRect(parent, &rc);
         MoveWindow(s_chatPanel, rc.right - pw, 0, pw, rc.bottom, TRUE);
         {
             RECT prc;
             GetClientRect(s_chatPanel, &prc);
             MoveWindow(s_chatDisplay, 4, 4, prc.right - 8, prc.bottom - 100, TRUE);
-            MoveWindow(s_chatInput, 4, prc.bottom - 88, prc.right - 8 - 80, 80, TRUE);
-            MoveWindow(s_chatSend, prc.right - 72, prc.bottom - 88, 68, 80, TRUE);
+            MoveWindow(s_chatInput, 4, prc.bottom - 88, prc.right - 8 - 76, 84, TRUE);
+            MoveWindow(s_chatSend, prc.right - 68, prc.bottom - 88, 64, 40, TRUE);
+            MoveWindow(s_chatClear, prc.right - 68, prc.bottom - 44, 64, 40, TRUE);
         }
     }
 }
@@ -2387,19 +2642,12 @@ static LRESULT CALLBACK ChatProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
     case WM_COMMAND:
         if (LOWORD(wp) == 3) { /* 发送按钮 */
-            WCHAR input[2048];
-            GetWindowTextW(s_chatInput, input, 2048);
-            if (input[0]) {
-                /* TODO: 构建上下文 → AiStartAnalysis → 结果追加到 chatDisplay */
-                WCHAR line[2200];
-                StringCchPrintfW(line, 2200, L"你：%ls\r\n\r\n（等待 AI 回复…）\r\n\r\n", input);
-                {
-                    int len = GetWindowTextLengthW(s_chatDisplay);
-                    SendMessageW(s_chatDisplay, EM_SETSEL, len, len);
-                    SendMessageW(s_chatDisplay, EM_REPLACESEL, FALSE, (LPARAM)line);
-                }
-                SetWindowTextW(s_chatInput, L"");
-            }
+            GetWindowTextW(s_chatInput, s_lastUserMsg, CHAT_TURN_MAX);
+            ChatSendMessage();
+        } else if (LOWORD(wp) == 4) { /* 清空按钮 */
+            ChatHistoryClear();
+            SetWindowTextW(s_chatDisplay,
+                L"对话已清空。\r\n\r\n输入问题后点击「发送」。\r\n");
         }
         return 0;
     case WM_CLOSE:
@@ -2451,17 +2699,23 @@ void ChatPanelToggle(HWND mainHwnd)
                                       s_chatPanel, (HMENU)(INT_PTR)2, g_app.hInst, NULL);
         s_chatSend = CreateWindowExW(0, L"BUTTON", L"发送",
                                      WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                     0, 0, 68, 80,
+                                     0, 0, 68, 38,
                                      s_chatPanel, (HMENU)(INT_PTR)3, g_app.hInst, NULL);
+        s_chatClear = CreateWindowExW(0, L"BUTTON", L"清空",
+                                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                     0, 0, 68, 38,
+                                     s_chatPanel, (HMENU)(INT_PTR)4, g_app.hInst, NULL);
         if (g_app.hFont) {
             SendMessageW(s_chatDisplay, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
             SendMessageW(s_chatInput, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
             SendMessageW(s_chatSend, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+            SendMessageW(s_chatClear, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
         }
         SetWindowTextW(s_chatDisplay,
             L"AI 对话面板\r\n\r\n"
-            L"输入问题后点击「发送」。\r\n"
-            L"当前为框架版本，AI 调用集成待后续精化。\r\n");
+            L"输入问题后点击「发送」或按 Ctrl+Enter。\r\n"
+            L"支持多轮上下文（最近 6 轮）。\r\n"
+            L"每次提问自动附带系统进程/端口快照。\r\n");
         ChatLayout(mainHwnd);
         s_chatVisible = TRUE;
     } else {

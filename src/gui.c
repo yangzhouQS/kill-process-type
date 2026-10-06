@@ -153,6 +153,11 @@ static void Layout(HWND hwnd)
         MoveWindow(g_hBtnAiLog, pad + AppScale(454), y2, AppScale(120), btnH, TRUE);
     if (g_hBtnAiBatch)
         MoveWindow(g_hBtnAiBatch, pad + AppScale(520), y2, AppScale(110), btnH, TRUE);
+    {
+        HWND btnChat = GetDlgItem(hwnd, IDC_BTN_CHAT);
+        if (btnChat)
+            MoveWindow(btnChat, pad + AppScale(640), y2, AppScale(80), btnH, TRUE);
+    }
     if (g_app.hEditFilter) {
         int fw = AppScale(280);
         int fx = rc.right - pad - fw;
@@ -282,6 +287,17 @@ static void CreateControls(HWND hwnd)
     g_app.projectMode = ConfigGetBool(L"ProjectView", FALSE);
     if (g_app.hFont)
         SendMessageW(g_hChkProject, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+
+    /* WP7: AI 对话按钮（始终可见） */
+    {
+        HWND btnChat = CreateWindowExW(0, L"BUTTON", L"AI 对话",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                       0, 0, AppScale(80), AppScale(30),
+                                       hwnd, (HMENU)(INT_PTR)IDC_BTN_CHAT,
+                                       g_app.hInst, NULL);
+        if (g_app.hFont)
+            SendMessageW(btnChat, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+    }
 }
 
 /* ---------------- 消息处理 ---------------- */
@@ -362,8 +378,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return TrayHandleMessage(hwnd, wp, lp);
 
     case WM_APP_AI_DONE: /* ai.c 工作线程回投：kilo 分析结果 */
-        ActionsAiBatchApply(wp, lp); /* WP3: 批量风险回填 */
+        ActionsAiBatchApply(wp, lp);  /* WP3: 批量风险回填 */
         ActionsDiagCheckPending(wp, lp); /* WP5: 诊断结果路由 */
+        ActionsChatCheckPending(wp, lp);  /* WP7: 对话面板结果路由 */
         ActionsAiDone(wp, lp);            /* AI 报告窗口更新 */
         return 0;
 
@@ -567,6 +584,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDC_BTN_AI_DIAG:
             ActionsAiDiagOpen(hwnd);
+            break;
+        case IDC_BTN_CHAT:
+            ChatPanelToggle(hwnd);
             break;
         case IDM_TRAY_ORPHAN:
             ActionsCleanOrphans(FALSE);

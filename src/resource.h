@@ -35,6 +35,7 @@
 #define IDC_BTN_AI_BATCH  2012
 #define IDC_BTN_AI_DIAG   2013
 #define IDC_CHK_PROJECT   2014
+#define IDC_BTN_CHAT      2015
 
 /* 列表行右键菜单命令 */
 #define IDM_LIST_COPY_PATH  2101
