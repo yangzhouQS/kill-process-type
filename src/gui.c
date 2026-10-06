@@ -41,6 +41,8 @@ App g_app;
 static HWND s_hBtn[BTN_COUNT];
 static HWND g_hChkTree;
 static HWND g_hBtnAiLog; /* WP2: 日志复盘按钮（仅日志页签可见） */
+static HWND g_hBtnAiBatch; /* WP3: 批量风险扫描按钮 */
+static HWND g_hBtnAiDiag;  /* WP5: AI 诊断按钮 */
 
 /* 主窗口全部控件的主题应用（启动与热切换时调用） */
 static void ApplyThemeAll(void)
@@ -144,11 +146,13 @@ static void Layout(HWND hwnd)
         MoveWindow(g_hChkTree, pad + AppScale(328), y2, AppScale(56), btnH, TRUE);
     if (g_hBtnAiLog)
         MoveWindow(g_hBtnAiLog, pad + AppScale(392), y2, AppScale(120), btnH, TRUE);
+    if (g_hBtnAiBatch)
+        MoveWindow(g_hBtnAiBatch, pad + AppScale(520), y2, AppScale(110), btnH, TRUE);
     if (g_app.hEditFilter) {
         int fw = AppScale(280);
         int fx = rc.right - pad - fw;
-        if (fx < pad + AppScale(520) + pad)
-            fx = pad + AppScale(520) + pad;
+        if (fx < pad + AppScale(640) + pad)
+            fx = pad + AppScale(640) + pad;
         MoveWindow(g_app.hEditFilter, fx, y2, fw, btnH, TRUE);
     }
 
@@ -190,11 +194,11 @@ static void CreateControls(HWND hwnd)
                                  0, 0, AppScale(320), AppScale(30),
                                  hwnd, (HMENU)(INT_PTR)IDC_TAB, g_app.hInst, NULL);
     {
-        static const WCHAR *kTabs[4] = { L"全部进程", L"Node/Python", L"端口占用", L"日志" };
+        static const WCHAR *kTabs[5] = { L"全部进程", L"Node/Python", L"端口占用", L"日志", L"AI 诊断" };
         TCITEMW ti;
         ZeroMemory(&ti, sizeof(ti));
         ti.mask = TCIF_TEXT;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             ti.pszText = (LPWSTR)kTabs[i];
             TabCtrl_InsertItem(g_app.hTab, i, &ti);
         }
@@ -245,6 +249,23 @@ static void CreateControls(HWND hwnd)
                                   hwnd, (HMENU)(INT_PTR)IDC_BTN_AI_LOG, g_app.hInst, NULL);
     if (g_app.hFont)
         SendMessageW(g_hBtnAiLog, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+
+    /* WP3: 批量风险扫描按钮（进程视图可见） */
+    g_hBtnAiBatch = CreateWindowExW(0, L"BUTTON", L"AI 风险扫描",
+                                    WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                                    0, 0, AppScale(110), AppScale(30),
+                                    hwnd, (HMENU)(INT_PTR)IDC_BTN_AI_BATCH, g_app.hInst, NULL);
+    if (g_app.hFont)
+        SendMessageW(g_hBtnAiBatch, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+
+    /* WP5: AI 诊断按钮（诊断页签可见） */
+    g_hBtnAiDiag = CreateWindowExW(0, L"BUTTON", L"生成全局诊断快照",
+                                   WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                                   0, 0, AppScale(160), AppScale(30),
+                                   hwnd, (HMENU)(INT_PTR)IDC_BTN_AI_DIAG,
+                                   g_app.hInst, NULL);
+    if (g_app.hFont)
+        SendMessageW(g_hBtnAiDiag, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
 }
 
 /* ---------------- 消息处理 ---------------- */
@@ -310,7 +331,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return TrayHandleMessage(hwnd, wp, lp);
 
     case WM_APP_AI_DONE: /* ai.c 工作线程回投：kilo 分析结果 */
-        ActionsAiDone(wp, lp);
+        ActionsAiBatchApply(wp, lp); /* WP3: 批量扫描结果回填 */
+        ActionsAiDone(wp, lp);        /* AI 报告窗口更新 */
         return 0;
 
     case WM_CONTEXTMENU:
@@ -323,12 +345,53 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         LRESULT themeRes = 0;
         if (ThemeOnHeaderNotify(hdr, &themeRes))
             return themeRes; /* 深色表头绘制 */
+        if (hdr && hdr->code == NM_CUSTOMDRAW && hdr->idFrom == IDC_LIST) {
+            /* WP3: AI 风险列子项着色 */
+            NMLVCUSTOMDRAW *lvcd = (NMLVCUSTOMDRAW *)lp;
+            if (lvcd->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                return CDRF_NOTIFYITEMDRAW;
+            }
+            if (lvcd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                return CDRF_NOTIFYSUBITEMDRAW;
+            }
+            if (lvcd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
+                int subItem = lvcd->iSubItem;
+                int riskCol = (g_app.mode == MODE_PROC) ? 7 : 6;
+                if (subItem == riskCol) {
+                    DWORD pid = (DWORD)lvcd->nmcd.lItemlParam;
+                    const ProcInfo *pi = NULL;
+                    for (size_t k = 0; k < g_app.procs.count; k++)
+                        if (g_app.procs.items[k].pid == pid) {
+                            pi = &g_app.procs.items[k];
+                            break;
+                        }
+                    if (pi) {
+                        if (pi->aiRisk == RISK_HIGH)
+                            lvcd->clrText = RGB(217, 48, 37);
+                        else if (pi->aiRisk == RISK_MED)
+                            lvcd->clrText = RGB(176, 96, 0);
+                        else if (pi->aiRisk == RISK_LOW)
+                            lvcd->clrText = RGB(30, 142, 62);
+                    }
+                }
+                return CDRF_DODEFAULT;
+            }
+            break;
+        }
         if (hdr && hdr->idFrom == IDC_TAB && hdr->code == TCN_SELCHANGE) {
             ViewsApplyMode(TRUE);
-            /* WP2: 日志复盘按钮仅日志页签可见 */
-            if (g_hBtnAiLog) {
+            /* WP2/WP3/WP5: 按钮按页签可见性 */
+            {
                 int mode = (int)TabCtrl_GetCurSel(g_app.hTab);
-                ShowWindow(g_hBtnAiLog, mode == MODE_LOG ? SW_SHOW : SW_HIDE);
+                if (g_hBtnAiLog)
+                    ShowWindow(g_hBtnAiLog, mode == MODE_LOG ? SW_SHOW : SW_HIDE);
+                if (g_hBtnAiBatch)
+                    ShowWindow(g_hBtnAiBatch,
+                               (mode == MODE_ALL || mode == MODE_PROC)
+                                   ? SW_SHOW : SW_HIDE);
+                if (g_hBtnAiDiag)
+                    ShowWindow(g_hBtnAiDiag,
+                               mode == MODE_DIAG ? SW_SHOW : SW_HIDE);
             }
         }
         else if (hdr && hdr->idFrom == IDC_LIST && hdr->code == LVN_COLUMNCLICK)
@@ -446,6 +509,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDC_BTN_AI_LOG:
             ActionsAiLogReview(hwnd);
+            break;
+        case IDC_BTN_AI_BATCH:
+            ActionsAiBatchScan(hwnd);
+            break;
+        case IDC_BTN_AI_DIAG:
+            ActionsAiDiagOpen(hwnd);
             break;
         case IDM_TRAY_ORPHAN:
             ActionsCleanOrphans(FALSE);

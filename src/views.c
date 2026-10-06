@@ -11,6 +11,7 @@
 #include <wctype.h>
 
 #include "app.h"
+#include "klog.h"
 #include "net.h"
 #include "resource.h"
 #include "views.h"
@@ -26,7 +27,26 @@ static const ColDef kColsProc[] = {
     { L"父PID",       70 },
     { L"内存",        90 },
     { L"类型",        80 },
-    { L"可执行路径", 460 },
+    { L"可执行路径", 320 },
+    { L"AI风险",      70 },
+};
+static const ColDef kColsProcTree[] = {
+    { L"进程名（树形）", 300 },
+    { L"PID",             70 },
+    { L"父PID",           70 },
+    { L"内存",            90 },
+    { L"类型",            80 },
+    { L"可执行路径",     380 },
+};
+static const ColDef kColsProcCmd[] = {
+    { L"进程名",     170 },
+    { L"PID",         70 },
+    { L"父PID",       70 },
+    { L"内存",        90 },
+    { L"类型",        80 },
+    { L"可执行路径", 280 },
+    { L"命令行",     360 },
+    { L"AI风险",      70 },
 };
 static const ColDef kColsPort[] = {
     { L"端口",        80 },
@@ -37,6 +57,14 @@ static const ColDef kColsPort[] = {
     { L"内存",        90 },
     { L"可执行路径", 420 },
 };
+static const ColDef kColsLog[] = {
+    { L"时间",       130 },
+    { L"来源",       100 },
+    { L"进程名",     150 },
+    { L"PID",         80 },
+    { L"结果",        80 },
+    { L"可执行路径", 460 },
+};
 
 void ViewsSetColumns(void)
 {
@@ -46,12 +74,27 @@ void ViewsSetColumns(void)
 
     if (!g_app.hList)
         return;
+    if (g_app.mode == MODE_DIAG) {
+        /* WP5: 诊断页签无列表列 */
+        while (ListView_DeleteColumn(g_app.hList, 0))
+            ;
+        return;
+    }
     while (ListView_DeleteColumn(g_app.hList, 0))
         ;
 
     if (g_app.mode == MODE_PORT) {
         cols = kColsPort;
         nCols = (int)(sizeof(kColsPort) / sizeof(kColsPort[0]));
+    } else if (g_app.mode == MODE_LOG) {
+        cols = kColsLog;
+        nCols = (int)(sizeof(kColsLog) / sizeof(kColsLog[0]));
+    } else if (g_app.mode == MODE_ALL && g_app.treeMode) {
+        cols = kColsProcTree;
+        nCols = (int)(sizeof(kColsProcTree) / sizeof(kColsProcTree[0]));
+    } else if (g_app.mode == MODE_PROC) {
+        cols = kColsProcCmd; /* Node/Python 视图带命令行列 */
+        nCols = (int)(sizeof(kColsProcCmd) / sizeof(kColsProcCmd[0]));
     } else {
         cols = kColsProc;
         nCols = (int)(sizeof(kColsProc) / sizeof(kColsProc[0]));
@@ -371,16 +414,43 @@ static int __cdecl CmpPortRow(const void *pa, const void *pb)
     return s_cmpDesc ? -r : r;
 }
 
+/* 日志视图比较器
+ * 列：0 时间 1 来源 2 进程名 3 PID 4 结果 5 路径 */
+static int __cdecl CmpLogRow(const void *pa, const void *pb)
+{
+    const LogEntry *x = (const LogEntry *)pa;
+    const LogEntry *y = (const LogEntry *)pb;
+    int r = 0;
+
+    switch (s_cmpCol) {
+    case 0: r = (x->unixTime > y->unixTime) - (x->unixTime < y->unixTime); break;
+    case 1: r = lstrcmpiW(x->source, y->source); break;
+    case 2: r = lstrcmpiW(x->name, y->name); break;
+    case 3: r = CmpPid(x->pid, y->pid); break;
+    case 4: r = (int)x->ok - (int)y->ok; break;
+    case 5: r = lstrcmpiW(x->path, y->path); break;
+    default: r = 0; break;
+    }
+    if (!r)
+        r = (x->unixTime > y->unixTime) - (x->unixTime < y->unixTime);
+    return s_cmpDesc ? -r : r;
+}
+
 /* 对当前视图缓存数据应用排序（不改列头箭头） */
 static void ApplySort(void)
 {
     if (g_app.sortCol < 0)
         return;
+    if (g_app.mode == MODE_ALL && g_app.treeMode)
+        return; /* 树形模式由重建时的兄弟节点排序处理，不平铺排序缓存 */
     s_cmpCol = g_app.sortCol;
     s_cmpDesc = g_app.sortDesc;
     if (g_app.mode == MODE_PORT) {
         if (g_app.rows && g_app.rowCount)
             qsort(g_app.rows, g_app.rowCount, sizeof(PortRow), CmpPortRow);
+    } else if (g_app.mode == MODE_LOG) {
+        if (g_app.logs.items && g_app.logs.count)
+            qsort(g_app.logs.items, g_app.logs.count, sizeof(LogEntry), CmpLogRow);
     } else {
         if (g_app.procs.items && g_app.procs.count)
             qsort(g_app.procs.items, g_app.procs.count, sizeof(ProcInfo), CmpProcRow);
@@ -411,6 +481,19 @@ static void UpdateHeaderArrows(void)
 
 void ViewsSortBy(int col)
 {
+    if (g_app.mode == MODE_ALL && g_app.treeMode) {
+        /* 树形模式：支持列排序（兄弟节点排序，内存列=子树合计）。
+         * 内存列首次点击默认降序（最大分组在前），其余列默认升序。 */
+        if (g_app.sortCol == col)
+            g_app.sortDesc = !g_app.sortDesc;
+        else {
+            g_app.sortCol = col;
+            g_app.sortDesc = (col == 3);
+        }
+        ViewsRebuild();
+        UpdateHeaderArrows();
+        return;
+    }
     if (g_app.sortCol == col)
         g_app.sortDesc = !g_app.sortDesc;
     else {
@@ -420,6 +503,53 @@ void ViewsSortBy(int col)
     ApplySort();
     ViewsRebuild();
     UpdateHeaderArrows();
+}
+
+/* ---------------- 树形排序 ---------------- */
+
+/* 树形模式兄弟节点排序上下文（ViewsRebuild 树形分支内设置） */
+static const long long *s_treeSubMem;
+static int s_treeCmpCol = -1;
+static BOOL s_treeCmpDesc;
+
+static int __cdecl TreeIdxCmp(const void *pa, const void *pb)
+{
+    int x = *(const int *)pa;
+    int y = *(const int *)pb;
+    const ProcInfo *px = &g_app.procs.items[x];
+    const ProcInfo *py = &g_app.procs.items[y];
+    int r = 0;
+
+    switch (s_treeCmpCol) {
+    case 0: r = lstrcmpiW(px->name, py->name); break;
+    case 1: r = CmpPid(px->pid, py->pid); break;
+    case 3: /* 内存列 = 子树合计（分组占用） */
+        r = (s_treeSubMem[x] > s_treeSubMem[y]) - (s_treeSubMem[x] < s_treeSubMem[y]);
+        break;
+    case 5: r = lstrcmpiW(px->path, py->path); break;
+    default: r = 0; break;
+    }
+    return s_treeCmpDesc ? -r : r;
+}
+
+/* 树形模式：切换某 PID 子树折叠状态并重建 */
+void ViewsToggleCollapse(DWORD pid)
+{
+    int i;
+
+    if (!(g_app.mode == MODE_ALL && g_app.treeMode))
+        return;
+    for (i = 0; i < g_app.collapsedCount; i++)
+        if (g_app.collapsedPids[i] == pid) {
+            g_app.collapsedPids[i] =
+                g_app.collapsedPids[g_app.collapsedCount - 1];
+            g_app.collapsedCount--;
+            ViewsRebuild();
+            return;
+        }
+    if (g_app.collapsedCount < 128)
+        g_app.collapsedPids[g_app.collapsedCount++] = pid;
+    ViewsRebuild();
 }
 
 /* 从缓存重建列表（应用当前筛选），不做系统快照 */
@@ -434,6 +564,10 @@ void ViewsRebuild(void)
 
     if (!g_app.hList)
         return;
+    if (g_app.mode == MODE_DIAG) {
+        ListView_DeleteAllItems(g_app.hList);
+        return; /* WP5: 诊断页签无列表行 */
+    }
     GetFilterText(filter, 64);
 
     SaveCheckedPids(&keepPids, &keepN);
@@ -515,8 +649,213 @@ void ViewsRebuild(void)
             else
                 nUdp++;
         }
+    } else if (g_app.mode == MODE_LOG) {
+        /* 日志视图：时间/来源/进程名/PID/结果/路径 */
+        int nOk = 0;
+        for (size_t i = 0; i < g_app.logs.count; i++) {
+            LogEntry *e = &g_app.logs.items[i];
+            WCHAR pid[16];
+            LVITEMW lvi;
+            int idx;
+
+            if (filter[0] &&
+                !NameMatch(e->name, filter) && !NameMatch(e->source, filter) &&
+                !NameMatch(e->path, filter))
+                continue;
+            StringCchPrintfW(pid, 16, L"%lu", (unsigned long)e->pid);
+            ZeroMemory(&lvi, sizeof(lvi));
+            lvi.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
+            lvi.iItem = row++;
+            lvi.pszText = e->timeText;
+            lvi.lParam = (LPARAM)(INT_PTR)e->pid;
+            lvi.iImage = -1;
+            idx = ListView_InsertItem(g_app.hList, &lvi);
+            if (idx < 0)
+                continue;
+            ListView_SetItemText(g_app.hList, idx, 1, e->source);
+            ListView_SetItemText(g_app.hList, idx, 2, e->name);
+            ListView_SetItemText(g_app.hList, idx, 3, pid);
+            ListView_SetItemText(g_app.hList, idx, 4,
+                                 (LPWSTR)(e->ok ? L"已终止" : L"失败"));
+            ListView_SetItemText(g_app.hList, idx, 5,
+                                 e->path[0] ? e->path : (LPWSTR)L"-");
+            if (e->ok)
+                nOk++;
+            shown++;
+        }
+        nNode = nOk; /* 复用变量位传给状态栏 */
     } else {
         /* 全部进程 / Node-Python 视图共用行渲染 */
+        BOOL tree = (g_app.mode == MODE_ALL && g_app.treeMode);
+        BOOL cmdCol = (g_app.mode == MODE_PROC); /* Node/Python 视图第 7 列 */
+        if (tree) {
+            /* 树形模式：DFS 展开（父在前子紧随），折叠子树整体隐藏。
+             * 支持列排序：兄弟节点按当前排序列排序（内存列 = 子树合计）。 */
+            int n = (int)g_app.procs.count;
+            int *parentIdx = (int *)malloc((size_t)(n ? n : 1) * sizeof(int));
+            long long *subMem = (long long *)malloc((size_t)(n ? n : 1) * sizeof(long long));
+            int *firstKid = (int *)malloc((size_t)(n ? n : 1) * sizeof(int));
+            int *nextSib = (int *)malloc((size_t)(n ? n : 1) * sizeof(int));
+            int *kidBuf = (int *)malloc((size_t)(n ? n : 1) * sizeof(int));
+
+            if (parentIdx && subMem && firstKid && nextSib && kidBuf) {
+                /* 建父子链 */
+                for (int i = 0; i < n; i++) {
+                    parentIdx[i] = -1;
+                    firstKid[i] = -1;
+                    nextSib[i] = -1;
+                    subMem[i] = (long long)g_app.procs.items[i].memBytes;
+                }
+                for (int i = 0; i < n; i++) {
+                    ProcInfo *p = &g_app.procs.items[i];
+                    if (p->pid == 0 || p->pid == 4)
+                        continue;
+                    for (int pi = 0; pi < n; pi++) {
+                        if (g_app.procs.items[pi].pid == p->ppid &&
+                            g_app.procs.items[pi].pid != 0) {
+                            parentIdx[i] = pi;
+                            break;
+                        }
+                    }
+                }
+                for (int i = 0; i < n; i++) {
+                    if (parentIdx[i] >= 0) {
+                        nextSib[i] = firstKid[parentIdx[i]];
+                        firstKid[parentIdx[i]] = i;
+                    }
+                }
+
+                /* 排序设置（内存列用子树合计） */
+                s_treeSubMem = subMem;
+                s_treeCmpCol = g_app.sortCol;
+                s_treeCmpDesc = g_app.sortDesc;
+
+                /* 收集某节点的孩子到 kidBuf 并按排序规则排序，返回数量 */
+                #define TREE_COLLECT_KIDS(node)                                    \
+                    do {                                                           \
+                        int kc = 0;                                                \
+                        for (int k = firstKid[node]; k >= 0; k = nextSib[k])       \
+                            kidBuf[kc++] = k;                                      \
+                        if (s_treeCmpCol >= 0 && kc > 1)                           \
+                            qsort(kidBuf, (size_t)kc, sizeof(int), TreeIdxCmp);    \
+                        nkids = kc;                                                \
+                    } while (0)
+
+                /* DFS 根节点列表也排序 */
+                {
+                    int rc = 0;
+                    int *roots = kidBuf; /* 复用缓冲（根处理先于孩子使用） */
+                    for (int i = 0; i < n; i++) {
+                        if (g_app.procs.items[i].pid == 0 ||
+                            g_app.procs.items[i].pid == 4)
+                            continue;
+                        if (parentIdx[i] < 0)
+                            roots[rc++] = i;
+                    }
+                    if (s_treeCmpCol >= 0 && rc > 1)
+                        qsort(roots, (size_t)rc, sizeof(int), TreeIdxCmp);
+
+                    {
+                        int stack[128];
+                        int dstack[128];
+                        int sp = 0;
+                        int nkids = 0;
+                        for (int r = rc - 1; r >= 0; r--) {
+                            stack[sp] = roots[r];
+                            dstack[sp] = 0;
+                            if (sp < 127)
+                                sp++;
+                        }
+                        while (sp > 0) {
+                            int cur, d, idx;
+                            ProcInfo *cp;
+                            WCHAR pid[16], ppid[16], mem[32], name[128];
+                            LVITEMW lvi;
+                            BOOL collapsed = FALSE;
+                            unsigned long long memShown;
+
+                            sp--;
+                            cur = stack[sp];
+                            d = dstack[sp];
+                            cp = &g_app.procs.items[cur];
+
+                            /* 折叠状态 */
+                            for (int c = 0; c < g_app.collapsedCount; c++)
+                                if (g_app.collapsedPids[c] == cp->pid)
+                                    collapsed = TRUE;
+
+                            /* 孩子数量（未折叠时用于 ▾/▸ 标记） */
+                            {
+                                int kc = 0;
+                                for (int k = firstKid[cur]; k >= 0; k = nextSib[k])
+                                    kc++;
+                                nkids = kc;
+                            }
+
+                            /* 内存列显示：有孩子时显示子树合计 */
+                            memShown = (nkids > 0)
+                                           ? (unsigned long long)subMem[cur]
+                                           : cp->memBytes;
+
+                            if (!NameMatch(cp->name, filter))
+                                goto dfs_skip_row;
+                            name[0] = L'\0';
+                            for (int s = 0; s < d && s < 16; s++)
+                                StringCchCatW(name, 128, L"    ");
+                            if (nkids > 0)
+                                StringCchCatW(name, 128, collapsed ? L"▸ " : L"▾ ");
+                            else
+                                StringCchCatW(name, 128, L"· ");
+                            StringCchCatNW(name, 128, cp->name, 64);
+                            StringCchPrintfW(pid, 16, L"%lu", (unsigned long)cp->pid);
+                            StringCchPrintfW(ppid, 16, L"%lu", (unsigned long)cp->ppid);
+                            FormatMem(memShown, mem, 32);
+                            ZeroMemory(&lvi, sizeof(lvi));
+                            lvi.mask = LVIF_TEXT | LVIF_PARAM | LVIF_IMAGE;
+                            lvi.iItem = row++;
+                            lvi.pszText = name;
+                            lvi.lParam = (LPARAM)(INT_PTR)cp->pid;
+                            lvi.iImage = GetIconIndex(cp->path);
+                            idx = ListView_InsertItem(g_app.hList, &lvi);
+                            if (idx >= 0) {
+                                ListView_SetItemText(g_app.hList, idx, 1, pid);
+                                ListView_SetItemText(g_app.hList, idx, 2, ppid);
+                                ListView_SetItemText(g_app.hList, idx, 3, mem);
+                                ListView_SetItemText(g_app.hList, idx, 4,
+                                    (LPWSTR)((cp->type == PT_NONE) ? L"—"
+                                                                   : ProcTypeLabel(cp->type)));
+                                ListView_SetItemText(g_app.hList, idx, 5,
+                                    cp->path[0] ? cp->path : (LPWSTR)L"(无法读取)");
+                            }
+                            shown++;
+                            if (cp->type == PT_NODE)
+                                nNode++;
+                            else if (cp->type == PT_PYTHON)
+                                nPy++;
+                            else
+                                nOther++;
+
+                        dfs_skip_row:
+                            if (collapsed)
+                                continue; /* 折叠：不压子节点 */
+                            TREE_COLLECT_KIDS(cur);
+                            for (int c = nkids - 1; c >= 0 && sp < 127; c--) {
+                                stack[sp] = kidBuf[c];
+                                dstack[sp] = d + 1;
+                                sp++;
+                            }
+                        }
+                    }
+                }
+                #undef TREE_COLLECT_KIDS
+                s_treeSubMem = NULL;
+            }
+            free(parentIdx);
+            free(subMem);
+            free(firstKid);
+            free(nextSib);
+            free(kidBuf);
+        } else {
         for (size_t i = 0; i < g_app.procs.count; i++) {
             ProcInfo *p = &g_app.procs.items[i];
             WCHAR pid[16], ppid[16], mem[32];
@@ -548,6 +887,23 @@ void ViewsRebuild(void)
             ListView_SetItemText(g_app.hList, idx, 4, (LPWSTR)typeText);
             ListView_SetItemText(g_app.hList, idx, 5,
                                  p->path[0] ? p->path : (LPWSTR)L"(无法读取)");
+            if (cmdCol) {
+                ListView_SetItemText(g_app.hList, idx, 6,
+                                     p->cmdline[0] ? p->cmdline : (LPWSTR)L"-");
+                /* WP3: AI 风险列 */
+                {
+                    int riskCol = 7;
+                    ListView_SetItemText(g_app.hList, idx, riskCol,
+                        (LPWSTR)(p->aiRisk == RISK_HIGH ? L"高"
+                            : (p->aiRisk == RISK_MED ? L"中"
+                            : (p->aiRisk == RISK_LOW ? L"低" : L"—"))));
+                }
+            } else {
+                ListView_SetItemText(g_app.hList, idx, 6,
+                    (LPWSTR)(p->aiRisk == RISK_HIGH ? L"高"
+                        : (p->aiRisk == RISK_MED ? L"中"
+                        : (p->aiRisk == RISK_LOW ? L"低" : L"—"))));
+            }
 
             if (p->type == PT_NODE)
                 nNode++;
@@ -557,6 +913,7 @@ void ViewsRebuild(void)
                 nOther++;
             shown++;
         }
+        }
     }
     RestoreCheckedPids(keepPids, keepN);
     free(keepPids);
@@ -565,17 +922,31 @@ void ViewsRebuild(void)
 
     if (g_app.hStatus) {
         WCHAR s[192];
-        if (g_app.mode == MODE_ALL)
-            StringCchPrintfW(s, 192,
-                             L"共 %d 个进程（显示 %d）    Node: %d    Python: %d    上次刷新 %02d:%02d:%02d",
-                             (int)g_app.procs.count, shown, nNode, nPy,
-                             (int)g_app.lastScan.wHour, (int)g_app.lastScan.wMinute,
-                             (int)g_app.lastScan.wSecond);
+        if (g_app.mode == MODE_ALL) {
+            if (g_app.treeMode)
+                StringCchPrintfW(s, 192,
+                                 L"共 %d 进程（树形）    Node: %d    Python: %d    内存列=子树合计    %02d:%02d:%02d",
+                                 (int)g_app.procs.count, nNode, nPy,
+                                 (int)g_app.lastScan.wHour, (int)g_app.lastScan.wMinute,
+                                 (int)g_app.lastScan.wSecond);
+            else
+                StringCchPrintfW(s, 192,
+                                 L"共 %d 个进程（显示 %d）    Node: %d    Python: %d    上次刷新 %02d:%02d:%02d",
+                                 (int)g_app.procs.count, shown, nNode, nPy,
+                                 (int)g_app.lastScan.wHour, (int)g_app.lastScan.wMinute,
+                                 (int)g_app.lastScan.wSecond);
+        }
         else if (g_app.mode == MODE_PROC)
             StringCchPrintfW(s, 192,
                              L"Node.js: %d 个    Python: %d 个    上次刷新 %02d:%02d:%02d",
                              nNode, nPy, (int)g_app.lastScan.wHour,
                              (int)g_app.lastScan.wMinute, (int)g_app.lastScan.wSecond);
+        else if (g_app.mode == MODE_LOG)
+            StringCchPrintfW(s, 192,
+                             L"终止记录: %d 条（显示 %d）    成功 %d / 失败 %d    上次刷新 %02d:%02d:%02d",
+                             (int)g_app.logs.count, shown, nNode, shown - nNode,
+                             (int)g_app.lastScan.wHour, (int)g_app.lastScan.wMinute,
+                             (int)g_app.lastScan.wSecond);
         else
             StringCchPrintfW(s, 192,
                              L"监听: %d 项（显示 %d）  保留区间: %d 个    TCP %d / UDP %d    上次刷新 %02d:%02d:%02d",
@@ -592,6 +963,9 @@ void ViewsRescan(void)
 {
     GetLocalTime(&g_app.lastScan);
 
+    if (g_app.mode == MODE_DIAG) {
+        return; /* WP5: 诊断页签无快照需求 */
+    }
     if (g_app.mode == MODE_PORT) {
         if (BuildPortRows() < 0) {
             if (g_app.hStatus)
@@ -599,6 +973,9 @@ void ViewsRescan(void)
                              (LPARAM)L"端口监听表获取失败，请稍后刷新");
             return;
         }
+    } else if (g_app.mode == MODE_LOG) {
+        KlogFree(&g_app.logs);
+        KlogLoad(&g_app.logs); /* 失败按空处理 */
     } else {
         FreeProcList(&g_app.procs);
         if (g_app.mode == MODE_ALL) {
@@ -638,7 +1015,9 @@ void ViewsApplyMode(BOOL rescan)
         SendMessageW(g_app.hEditFilter, EM_SETCUEBANNER, FALSE,
                      (LPARAM)(mode == MODE_PORT
                                   ? L"筛选端口，如：3000 或 80,3000-3010"
-                                  : L"筛选进程名，如：node"));
+                                  : (mode == MODE_LOG
+                                         ? L"筛选名称/来源/路径"
+                                         : L"筛选进程名，如：node")));
     if (rescan)
         ViewsRescan();
 }
@@ -649,4 +1028,5 @@ void ViewsCleanup(void)
     free(g_app.rows);
     g_app.rows = NULL;
     g_app.rowCount = 0;
+    KlogFree(&g_app.logs);
 }

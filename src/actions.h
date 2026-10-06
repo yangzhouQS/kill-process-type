@@ -39,6 +39,15 @@ void ActionsOnListContextMenu(HWND hwnd, LPARAM lp);
 /* 日志页签 AI 复盘：收集勾选日志行→PROMPT_LOG_REVIEW→报告窗口 */
 void ActionsAiLogReview(HWND hwnd);
 
+/* WP3: 批量 AI 风险扫描（勾选行→分批调 kilo→回填 aiRisk→重建列表） */
+void ActionsAiBatchScan(HWND hwnd);
+
+/* WP5: AI 全局诊断窗口 */
+void ActionsAiDiagOpen(HWND hwnd);
+
+/* WP3: 解析批量扫描结果并回填（WM_APP_AI_DONE 后调用） */
+void ActionsAiBatchApply(WPARAM wp, LPARAM lp);
+
 /* Dev 快捷操作（右键菜单项，gui.c 路由） */
 void OpenRowUrl(HWND owner, BOOL copyOnly);
 void ShowRowInExplorer(int rowIdx);

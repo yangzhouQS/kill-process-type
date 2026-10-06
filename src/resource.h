@@ -29,6 +29,8 @@
 #define IDC_TAB           2008
 #define IDC_CHK_TREE      2010
 #define IDC_BTN_AI_LOG    2011
+#define IDC_BTN_AI_BATCH  2012
+#define IDC_BTN_AI_DIAG   2013
 
 /* 列表行右键菜单命令 */
 #define IDM_LIST_COPY_PATH  2101

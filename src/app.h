@@ -12,7 +12,9 @@
 typedef enum {
     MODE_ALL = 0,   /* 全部进程 */
     MODE_PROC = 1,  /* Node / Python */
-    MODE_PORT = 2   /* 端口占用 */
+    MODE_PORT = 2,  /* 端口占用 */
+    MODE_LOG = 3,   /* 终止日志 */
+    MODE_DIAG = 4   /* AI 诊断（WP5） */
 } ListMode;
 
 /* 端口监听条目与进程信息的 Join 结果（端口视图的一行） */
@@ -26,6 +28,22 @@ typedef struct {
     BOOL reserved;  /* TRUE = winnat/系统保留区间行（无进程，杀进程无效） */
     WORD portEnd;   /* reserved 行的区间终点（含） */
 } PortRow;
+
+/* 终止进程日志的一条记录（klog.c 加载/写入） */
+typedef struct {
+    LONGLONG unixTime; /* 排序用时间戳 */
+    WCHAR timeText[24];
+    WCHAR source[16];  /* 来源：勾选清理/类型清理/孤儿·定时/孤儿·手动/CLI */
+    WCHAR name[64];
+    DWORD pid;
+    BOOL ok;
+    WCHAR path[MAX_PATH];
+} LogEntry;
+
+typedef struct {
+    LogEntry *items;
+    size_t count;
+} LogList;
 
 /* 全局应用上下文（gui.c 中定义） */
 typedef struct {
@@ -45,6 +63,10 @@ typedef struct {
     SYSTEMTIME lastScan;
     int sortCol;      /* 当前排序列（列头索引），-1 = 未排序（快照顺序） */
     BOOL sortDesc;    /* TRUE = 降序 */
+    BOOL treeMode;    /* 全部进程视图：树形分组模式（按父子链缩进+折叠） */
+    DWORD collapsedPids[128]; /* 树形模式已折叠的子树根 PID */
+    int collapsedCount;
+    LogList logs;     /* 日志视图缓存（klog.c 加载） */
 
     /* 杂项标志 */
     BOOL hideTipShown; /* 首次隐藏到托盘的气泡只提示一次 */

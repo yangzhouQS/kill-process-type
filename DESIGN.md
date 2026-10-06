@@ -152,6 +152,16 @@ UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\c
 
 ## 8. 更新日志
 
+- **v5.2-WP3+WP5（2026-10-06）**：
+  **WP3 批量风险扫描**——RiskLevel 枚举 + ProcInfo.aiRisk 字段；勾选≤50 进程
+  → PROMPT_RISK_BATCH（单次调用紧凑 TSV 上下文）→ AiExtractJson 解析
+  [{pid,level}] 回填；新增「AI风险」列（NM_CUSTOMDRAW 子项着色：高红/
+  中黄/低绿/—灰）；「AI 风险扫描」按钮仅进程视图可见；
+  **WP5 AI 诊断页签**——第 5 页签「AI 诊断」+ ActionsAiDiagOpen 独立窗口
+  （生成按钮+进度状态+RichEdit 报告区+导出按钮）；MODE_DIAG 无列表列/
+  无快照，诊断窗口带主题适配；完整快照组装+四区块报告+动作按钮解析
+  为后续迭代精化（当前框架就位，kilo 调用链路 TODO）。
+  修复：process.h↔app.h 循环包含（RiskLevel 移入 process.h）。
 - **v5.2-WP2+WP4（2026-10-06）**：
   **WP2 日志复盘**——日志页签新增「AI 复盘日志」按钮（切到日志页签时
   出现），勾选日志行→PROMPT_LOG_REVIEW→AI 报告窗口（复用评估对话框机制，

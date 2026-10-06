@@ -1158,6 +1158,305 @@ void ActionsAiLogReview(HWND hwnd)
     }
 }
 
+/* ---------------- WP3: 批量 AI 风险扫描 ---------------- */
+
+static BOOL s_batchActive = FALSE;
+
+/* 从模型 JSON 解析风险等级字符串 */
+static RiskLevel ParseRiskLevel(const WCHAR *s)
+{
+    if (!s)
+        return RISK_UNKNOWN;
+    if (wcsstr(s, L"高"))
+        return RISK_HIGH;
+    if (wcsstr(s, L"中"))
+        return RISK_MED;
+    if (wcsstr(s, L"低"))
+        return RISK_LOW;
+    return RISK_UNKNOWN;
+}
+
+void ActionsAiBatchScan(HWND hwnd)
+{
+    int cnt, checked = 0;
+    WCHAR context[16384];
+    WCHAR prompt[18432];
+    size_t ctxLen = 0;
+    int collected = 0;
+
+    (void)hwnd;
+    if (AiBusy() || s_batchActive)
+        return;
+    if (!g_app.hList || (g_app.mode != MODE_ALL && g_app.mode != MODE_PROC))
+        return;
+
+    context[0] = L'\0';
+    cnt = ListView_GetItemCount(g_app.hList);
+    for (int i = 0; i < cnt && collected < 50; i++) {
+        if (!ListView_GetCheckState(g_app.hList, i))
+            continue;
+        checked++;
+        {
+            LVITEMW it;
+            DWORD pid;
+            ZeroMemory(&it, sizeof(it));
+            it.mask = LVIF_PARAM;
+            it.iItem = i;
+            if (!ListView_GetItem(g_app.hList, &it))
+                continue;
+            pid = (DWORD)it.lParam;
+            if (!pid)
+                continue;
+            /* 从缓存取上下文 */
+            const ProcInfo *pi = FindInfoByPid(pid);
+            if (pi) {
+                WCHAR line[512];
+                StringCchPrintfW(line, 512, L"%lu\t%ls\t%luKB\t%ls\t%ls\t-\r\n",
+                                 (unsigned long)pid, pi->name,
+                                 (unsigned long)(pi->memBytes >> 10),
+                                 pi->type == PT_NODE ? L"node"
+                                     : (pi->type == PT_PYTHON ? L"python" : L"-"),
+                                 pi->path);
+                if (ctxLen + lstrlenW(line) < 16384 - 64) {
+                    StringCchCatW(context, 16384, line);
+                    ctxLen = lstrlenW(context);
+                }
+            }
+            collected++;
+        }
+    }
+    if (checked == 0) {
+        MessageBoxW(NULL, L"请先勾选要扫描的进程。", L"提示",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    StringCchPrintfW(prompt, 18432, AiGetPrompt(AIPROMPT_RISK_BATCH), context);
+    AiTruncateContext(prompt, 18432);
+
+    s_batchActive = TRUE;
+    {
+        WCHAR st[128];
+        StringCchPrintfW(st, 128, L"AI 风险扫描中…（%d 个进程，约 40~90 秒）",
+                         collected);
+        if (g_app.hStatus)
+            SendMessageW(g_app.hStatus, SB_SETTEXTW, 0, (LPARAM)st);
+    }
+    if (!AiStartAnalysis(g_app.hMain, prompt)) {
+        s_batchActive = FALSE;
+        MessageBoxW(NULL, L"无法启动 kilo 批量分析。", L"错误",
+                    MB_OK | MB_ICONERROR);
+    }
+}
+
+/* WM_APP_AI_DONE 时：若批量扫描进行中，解析结果回填 */
+void ActionsAiBatchApply(WPARAM wp, LPARAM lp)
+{
+    AiResult *r;
+
+    if (!s_batchActive)
+        return;
+    s_batchActive = FALSE;
+    r = (AiResult *)lp;
+    if (!r || !wp || !r->answer) {
+        if (g_app.hStatus)
+            SendMessageW(g_app.hStatus, SB_SETTEXTW, 0,
+                         (LPARAM)L"AI 风险扫描失败（kilo 不可用或超时）。");
+        return;
+    }
+    {
+        WCHAR *json = AiExtractJson(r->answer);
+        if (json) {
+            /* 解析 [{pid, level, reason}] 数组 */
+            /* 简化解析：扫描 "pid":NUM ... "level":"X" */
+            const WCHAR *p = json;
+            int filled = 0;
+            while (p && *p) {
+                const WCHAR *pidPos = wcsstr(p, L"\"pid\":");
+                const WCHAR *lvlPos;
+                if (!pidPos)
+                    break;
+                {
+                    DWORD pid = (DWORD)_wtol(pidPos + 6);
+                    lvlPos = wcsstr(pidPos, L"\"level\":");
+                    if (lvlPos && lvlPos - pidPos < 200) {
+                        RiskLevel lv;
+                        const WCHAR *q = lvlPos + 8;
+                        WCHAR levelStr[8] = {0};
+                        int li = 0;
+                        if (*q == L'"')
+                            q++;
+                        while (*q && *q != L'"' && li < 7)
+                            levelStr[li++] = *q++;
+                        lv = ParseRiskLevel(levelStr);
+                        /* 回填缓存 */
+                        for (size_t k = 0; k < g_app.procs.count; k++) {
+                            if (g_app.procs.items[k].pid == pid) {
+                                g_app.procs.items[k].aiRisk = lv;
+                                filled++;
+                                break;
+                            }
+                        }
+                        p = lvlPos + 8;
+                    } else {
+                        p = pidPos + 6;
+                    }
+                }
+            }
+            free(json);
+            if (g_app.hStatus) {
+                WCHAR st[128];
+                StringCchPrintfW(st, 128, L"AI 风险扫描完成：%d 个进程已评级。",
+                                 filled);
+                SendMessageW(g_app.hStatus, SB_SETTEXTW, 0, (LPARAM)st);
+            }
+            TrayShowBalloon(MAIN_WINDOW_TITLE, L"AI 风险扫描完成。");
+        } else {
+            if (g_app.hStatus)
+                SendMessageW(g_app.hStatus, SB_SETTEXTW, 0,
+                             (LPARAM)L"AI 风险扫描：模型输出非结构化（显示为未知）。");
+        }
+    }
+    ViewsRebuild(); /* 刷新风险列 */
+}
+
+/* ---------------- WP5: AI 全局诊断 ---------------- */
+
+static HWND s_diagDlg;
+static HWND s_diagBtn, s_diagStatus, s_diagEdit;
+
+static void DiagLayout(void)
+{
+    if (!s_diagDlg)
+        return;
+    {
+        RECT rc;
+        int pad = AppScale(10);
+        GetClientRect(s_diagDlg, &rc);
+        MoveWindow(s_diagBtn, pad, pad, AppScale(160), AppScale(30), TRUE);
+        MoveWindow(s_diagStatus, pad + AppScale(170), pad + AppScale(6),
+                   rc.right - pad * 2 - AppScale(170), AppScale(24), TRUE);
+        MoveWindow(s_diagEdit, pad, pad + AppScale(40),
+                   rc.right - pad * 2, rc.bottom - pad * 2 - AppScale(40), TRUE);
+    }
+}
+
+static LRESULT CALLBACK DiagProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_SIZE:
+        DiagLayout();
+        return 0;
+    case WM_ERASEBKGND:
+        if (ThemeOnEraseBkgnd(hwnd, (HDC)wp))
+            return 1;
+        break;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLOREDIT: {
+        HBRUSH br = ThemeOnCtlColor((HWND)lp, (HDC)wp);
+        if (br)
+            return (LRESULT)br;
+        break;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wp) == 1) { /* 生成按钮 */
+            /* TODO WP5-T5.4: 组装全局快照 → PROMPT_DIAG_GLOBAL → AiStartAnalysis */
+            SetWindowTextW(s_diagStatus, L"诊断快照生成中…（kilo 无头执行，约 1~3 分钟）");
+            SetWindowTextW(s_diagEdit,
+                L"等待 kilo 返回…\r\n\r\n"
+                L"诊断报告将包含四节：\r\n"
+                L"  1. 发现问题清单（信息/警告/高危）\r\n"
+                L"  2. 推测根因\r\n"
+                L"  3. 处理建议\r\n"
+                L"  4. 可执行动作\r\n\r\n"
+                L"提示：本功能需要 kilo 已登录。");
+        } else if (LOWORD(wp) == 2) { /* 导出 */
+            /* TODO WP5-T5.6: EM_GETTEXTEX → 保存 .md */
+        }
+        return 0;
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (hwnd == s_diagDlg) {
+            s_diagDlg = NULL;
+            s_diagEdit = NULL;
+            s_diagStatus = NULL;
+            s_diagBtn = NULL;
+        }
+        return 0;
+    default:
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void ActionsAiDiagOpen(HWND hwnd)
+{
+    static const WCHAR DIAG_CLASS[] = L"KptDiagDlg";
+    (void)hwnd;
+    if (s_diagDlg) {
+        ShowWindow(s_diagDlg, SW_RESTORE);
+        SetForegroundWindow(s_diagDlg);
+        return;
+    }
+    {
+        WNDCLASSEXW wc;
+        static BOOL registered = FALSE;
+        if (!registered) {
+            ZeroMemory(&wc, sizeof(wc));
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = DiagProc;
+            wc.hInstance = g_app.hInst;
+            wc.hIcon = LoadIconW(g_app.hInst, MAKEINTRESOURCEW(IDI_APP));
+            wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+            wc.hbrBackground = NULL;
+            wc.lpszClassName = DIAG_CLASS;
+            if (RegisterClassExW(&wc))
+                registered = TRUE;
+        }
+    }
+    {
+        int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+        if (g_app.hMain) {
+            RECT rm;
+            GetWindowRect(g_app.hMain, &rm);
+            x = rm.left + AppScale(60);
+            y = rm.top + AppScale(40);
+        }
+        s_diagDlg = CreateWindowExW(0, DIAG_CLASS, L"AI 全局诊断",
+                                    WS_OVERLAPPEDWINDOW,
+                                    x, y, AppScale(640), AppScale(520),
+                                    g_app.hMain, NULL, g_app.hInst, NULL);
+    }
+    if (!s_diagDlg)
+        return;
+    s_diagBtn = CreateWindowExW(0, L"BUTTON", L"生成全局诊断快照",
+                                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                0, 0, AppScale(160), AppScale(30),
+                                s_diagDlg, (HMENU)(INT_PTR)1, g_app.hInst, NULL);
+    s_diagStatus = CreateWindowExW(0, L"STATIC",
+                                   L"点击上方按钮开始分析（需 kilo 已登录）",
+                                   WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+                                   0, 0, AppScale(400), AppScale(24),
+                                   s_diagDlg, NULL, g_app.hInst, NULL);
+    s_diagEdit = RichTextCreate(s_diagDlg, 0);
+    if (s_diagEdit)
+        SetWindowTextW(s_diagEdit,
+            L"AI 全局诊断\r\n\r\n"
+            L"点击「生成全局诊断快照」开始分析。\r\n"
+            L"报告将展示：问题清单、根因、建议、可执行动作。");
+    if (g_app.hFont) {
+        SendMessageW(s_diagEdit, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        SendMessageW(s_diagStatus, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        SendMessageW(s_diagBtn, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+    }
+    ThemeApplyFrame(s_diagDlg);
+    ShowWindow(s_diagDlg, SW_SHOW);
+    UpdateWindow(s_diagDlg);
+    DiagLayout();
+}
+
 void ActionsAiMenuCommand(HWND hwnd)
 {
     (void)hwnd;
