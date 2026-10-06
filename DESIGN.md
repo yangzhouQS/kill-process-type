@@ -152,6 +152,15 @@ UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\c
 
 ## 8. 更新日志
 
+- **v5.2.1（2026-10-06）**：v5.2 收尾——WP5 核心功能补全
+  （DiagBuildContext 六源快照组装→kilo→四区块报告渲染→导出 .md，
+  GetSaveFileNameW 对话框+UTF-8 写盘）；诊断结果路由
+  （s_diagPending→WM_APP_AI_DONE→DiagApplyResult）；WP3/WP2/WP5 按钮
+  初始可见性修复（WS_VISIBLE+默认页签显示，切页签动态切换）。
+  **E2E 验证**：WP4 /ai-suggest 85s + /ai-query @file 45s 实际 kilo 调用
+  通过（JSON 输出可 ConvertFrom-Json 解析）；WP2/WP3/WP5 按钮存在性与
+  可见性经 EnumChildWindows 验证正确（2011/2012/2013，默认页签对应
+  显示/隐藏状态无误）。
 - **v5.2-WP3+WP5（2026-10-06）**：
   **WP3 批量风险扫描**——RiskLevel 枚举 + ProcInfo.aiRisk 字段；勾选≤50 进程
   → PROMPT_RISK_BATCH（单次调用紧凑 TSV 上下文）→ AiExtractJson 解析

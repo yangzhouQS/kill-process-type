@@ -242,7 +242,7 @@ static void CreateControls(HWND hwnd)
                                     WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
                                     0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)7, g_app.hInst, NULL);
 
-    /* WP2: 日志复盘按钮（默认隐藏，切到日志页签时显示） */
+    /* WP2: 日志复盘按钮（初始隐藏，切到日志页签时显示） */
     g_hBtnAiLog = CreateWindowExW(0, L"BUTTON", L"AI 复盘日志",
                                   WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
                                   0, 0, AppScale(120), AppScale(30),
@@ -250,15 +250,15 @@ static void CreateControls(HWND hwnd)
     if (g_app.hFont)
         SendMessageW(g_hBtnAiLog, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
 
-    /* WP3: 批量风险扫描按钮（进程视图可见） */
+    /* WP3: 批量风险扫描按钮（进程视图可见，默认 ALL 视图显示） */
     g_hBtnAiBatch = CreateWindowExW(0, L"BUTTON", L"AI 风险扫描",
-                                    WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                                    WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
                                     0, 0, AppScale(110), AppScale(30),
                                     hwnd, (HMENU)(INT_PTR)IDC_BTN_AI_BATCH, g_app.hInst, NULL);
     if (g_app.hFont)
         SendMessageW(g_hBtnAiBatch, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
 
-    /* WP5: AI 诊断按钮（诊断页签可见） */
+    /* WP5: AI 诊断按钮（初始隐藏，切到诊断页签时显示） */
     g_hBtnAiDiag = CreateWindowExW(0, L"BUTTON", L"生成全局诊断快照",
                                    WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
                                    0, 0, AppScale(160), AppScale(30),
@@ -331,8 +331,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return TrayHandleMessage(hwnd, wp, lp);
 
     case WM_APP_AI_DONE: /* ai.c 工作线程回投：kilo 分析结果 */
-        ActionsAiBatchApply(wp, lp); /* WP3: 批量扫描结果回填 */
-        ActionsAiDone(wp, lp);        /* AI 报告窗口更新 */
+        ActionsAiBatchApply(wp, lp); /* WP3: 批量风险回填 */
+        ActionsDiagCheckPending(wp, lp); /* WP5: 诊断结果路由 */
+        ActionsAiDone(wp, lp);            /* AI 报告窗口更新 */
         return 0;
 
     case WM_CONTEXTMENU:

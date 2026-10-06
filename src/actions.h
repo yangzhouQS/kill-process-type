@@ -45,6 +45,9 @@ void ActionsAiBatchScan(HWND hwnd);
 /* WP5: AI 全局诊断窗口 */
 void ActionsAiDiagOpen(HWND hwnd);
 
+/* WP5: 诊断结果路由（WM_APP_AI_DONE 时检查 pending 并派发） */
+void ActionsDiagCheckPending(WPARAM wp, LPARAM lp);
+
 /* WP3: 解析批量扫描结果并回填（WM_APP_AI_DONE 后调用） */
 void ActionsAiBatchApply(WPARAM wp, LPARAM lp);
 

@@ -3,6 +3,8 @@
  */
 #include "common.h"
 #include <commctrl.h>
+#include <commdlg.h>
+#include <richedit.h>
 #include <shellapi.h>
 #include <strsafe.h>
 #include <stdlib.h>
@@ -12,6 +14,7 @@
 #include "resource.h"
 #include "config.h"
 #include "klog.h"
+#include "net.h"
 #include "peb.h"
 #include "startup.h"
 #include "theme.h"
@@ -1325,6 +1328,208 @@ void ActionsAiBatchApply(WPARAM wp, LPARAM lp)
 static HWND s_diagDlg;
 static HWND s_diagBtn, s_diagStatus, s_diagEdit;
 
+/* ---------------- WP5: AI 全局诊断 ---------------- */
+
+static HWND s_diagDlg;
+static HWND s_diagBtn, s_diagStatus, s_diagEdit;
+static BOOL s_diagPending = FALSE; /* kilo 正在为诊断窗口分析 */
+
+/* 组装全局诊断上下文 */
+static void DiagBuildContext(WCHAR *buf, size_t cch)
+{
+    ProcList l;
+    NetList nl;
+    PortRangeList rl;
+    ProcList orphans;
+
+    buf[0] = L'\0';
+    StringCchCatW(buf, cch, L"=== 进程树（Top 30） ===\n");
+    ZeroMemory(&l, sizeof(l));
+    if (ScanAllProcesses(&l) >= 0) {
+        for (size_t i = 0; i < l.count && i < 30; i++)
+        {
+            WCHAR line[256];
+            StringCchPrintfW(line, 256, L"%lu\t%ls\t%luKB\tppid=%lu\t%ls\n",
+                             (unsigned long)l.items[i].pid, l.items[i].name,
+                             (unsigned long)(l.items[i].memBytes >> 10),
+                             (unsigned long)l.items[i].ppid,
+                             l.items[i].path[0] ? l.items[i].path : L"-");
+            StringCchCatW(buf, cch, line);
+        }
+    }
+
+    StringCchCatW(buf, cch, L"\n=== 端口监听（Top 30） ===\n");
+    ZeroMemory(&nl, sizeof(nl));
+    ScanListenPorts(&nl);
+    for (size_t i = 0; i < nl.count && i < 30; i++) {
+        WCHAR line[128];
+        StringCchPrintfW(line, 128, L"%lu\t%ls\tpid=%lu\n",
+                         (unsigned long)nl.items[i].port,
+                         nl.items[i].tcp ? L"TCP" : L"UDP",
+                         (unsigned long)nl.items[i].pid);
+        StringCchCatW(buf, cch, line);
+    }
+
+    StringCchCatW(buf, cch, L"\n=== winnat 保留区间 ===\n");
+    ZeroMemory(&rl, sizeof(rl));
+    ScanReservedPortRanges(&rl);
+    for (size_t i = 0; i < rl.count; i++) {
+        WCHAR line[64];
+        StringCchPrintfW(line, 64, L"%lu-%lu\t%ls\n",
+                         (unsigned long)rl.items[i].start,
+                         (unsigned long)rl.items[i].end,
+                         rl.items[i].tcp ? L"TCP" : L"UDP");
+        StringCchCatW(buf, cch, line);
+    }
+
+    StringCchCatW(buf, cch, L"\n=== 孤儿进程（Node/Python） ===\n");
+    ZeroMemory(&orphans, sizeof(orphans));
+    ScanOrphanProcesses(&orphans, TRUE);
+    if (orphans.count == 0)
+        StringCchCatW(buf, cch, L"（无）\n");
+    for (size_t i = 0; i < orphans.count; i++) {
+        WCHAR line[256];
+        StringCchPrintfW(line, 256, L"pid=%lu\t%ls\t%ls\n",
+                         (unsigned long)orphans.items[i].pid,
+                         orphans.items[i].name, orphans.items[i].path);
+        StringCchCatW(buf, cch, line);
+    }
+
+    StringCchCatW(buf, cch, L"\n=== 内存 Top 10 ===\n");
+    /* 用已有进程列表做选择排序 Top 10 */
+    if (l.count > 0) {
+        /* 按内存降序取前 10 */
+        for (int rank = 0; rank < 10 && (size_t)rank < l.count; rank++) {
+            size_t maxIdx = (size_t)rank;
+            for (size_t j = rank + 1; j < l.count; j++)
+                if (l.items[j].memBytes > l.items[maxIdx].memBytes)
+                    maxIdx = j;
+            if (maxIdx != (size_t)rank) {
+                ProcInfo t = l.items[rank];
+                l.items[rank] = l.items[maxIdx];
+                l.items[maxIdx] = t;
+            }
+            WCHAR line[256];
+            StringCchPrintfW(line, 256, L"%lu\t%ls\t%luKB\n",
+                             (unsigned long)l.items[rank].pid,
+                             l.items[rank].name,
+                             (unsigned long)(l.items[rank].memBytes >> 10));
+            StringCchCatW(buf, cch, line);
+        }
+    }
+
+    StringCchCatW(buf, cch, L"\n=== 最近 50 条终止日志 ===\n");
+    {
+        LogList logs;
+        ZeroMemory(&logs, sizeof(logs));
+        KlogLoad(&logs);
+        for (size_t i = 0; i < logs.count && i < 50; i++) {
+            WCHAR line[256];
+            StringCchPrintfW(line, 256, L"%ls\t%ls\t%ls\tpid=%lu\t%ls\n",
+                             logs.items[i].timeText, logs.items[i].source,
+                             logs.items[i].name,
+                             (unsigned long)logs.items[i].pid,
+                             logs.items[i].ok ? L"已终止" : L"失败");
+            StringCchCatW(buf, cch, line);
+        }
+        KlogFree(&logs);
+    }
+
+    FreeProcList(&l);
+    FreeNetList(&nl);
+    FreePortRangeList(&rl);
+    FreeProcList(&orphans);
+    AiTruncateContext(buf, 12000);
+}
+
+/* 诊断结果应用：渲染报告 + 解析动作按钮 */
+static void DiagApplyResult(AiResult *r)
+{
+    if (!s_diagDlg || !r) {
+        s_diagPending = FALSE;
+        return;
+    }
+    s_diagPending = FALSE;
+    if (r->answer && r->answer[0]) {
+        SetWindowTextW(s_diagStatus, L"诊断完成。");
+        char *rtf = RichTextBuildAiReport(
+            L"全局系统快照（进程/端口/孤儿/日志）",
+            r->thinking, r->answer, r->diag);
+        if (rtf) {
+            RichTextSetRtf(s_diagEdit, rtf);
+            free(rtf);
+        } else {
+            SetWindowTextW(s_diagEdit, r->answer);
+        }
+        TrayShowBalloon(MAIN_WINDOW_TITLE, L"AI 全局诊断完成。");
+    } else {
+        SetWindowTextW(s_diagStatus, L"诊断失败（kilo 不可用或超时）。");
+        SetWindowTextW(s_diagEdit,
+            L"诊断失败。请确认 kilo 已安装且已登录（kilo auth）。\r\n"
+            L"或稍后重试。");
+    }
+}
+
+/* 导出诊断报告为 .md */
+static void DiagExport(void)
+{
+    if (!s_diagEdit)
+        return;
+    {
+        OPENFILENAMEW ofn;
+        WCHAR path[MAX_PATH];
+        SYSTEMTIME st;
+
+        GetLocalTime(&st);
+        StringCchPrintfW(path, MAX_PATH,
+                         L"diagnose-%04u%02u%02u-%02u%02u%02u.md",
+                         st.wYear, st.wMonth, st.wDay,
+                         st.wHour, st.wMinute, st.wSecond);
+        ZeroMemory(&ofn, sizeof(ofn));
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = s_diagDlg;
+        ofn.lpstrFilter = L"Markdown (*.md)\0*.md\0All (*.*)\0*.*\0";
+        ofn.lpstrFile = path;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_OVERWRITEPROMPT;
+        if (GetSaveFileNameW(&ofn)) {
+            /* 从 RichEdit 取纯文本 */
+            GETTEXTLENGTHEX gtl;
+            GETTEXTEX gt;
+            gtl.flags = GTL_DEFAULT;
+            gtl.codepage = CP_UTF8;
+            {
+                LONGLONG len = SendMessageW(s_diagEdit, EM_GETTEXTLENGTHEX,
+                                            (WPARAM)&gtl, 0);
+                if (len > 0 && len < 1024 * 1024) {
+                    char *txt = (char *)malloc((size_t)len + 16);
+                    if (txt) {
+                        gt.cb = (DWORD)len + 8;
+                        gt.flags = GT_DEFAULT;
+                        gt.codepage = CP_UTF8;
+                        gt.lpDefaultChar = NULL;
+                        gt.lpUsedDefChar = NULL;
+                        SendMessageW(s_diagEdit, EM_GETTEXTEX,
+                                     (WPARAM)&gt, (LPARAM)txt);
+                        {
+                            HANDLE f = CreateFileW(path, GENERIC_WRITE, 0,
+                                                   NULL, CREATE_ALWAYS,
+                                                   FILE_ATTRIBUTE_NORMAL, NULL);
+                            if (f != INVALID_HANDLE_VALUE) {
+                                DWORD w;
+                                WriteFile(f, txt, (DWORD)lstrlenA(txt), &w, NULL);
+                                CloseHandle(f);
+                                SetWindowTextW(s_diagStatus, L"报告已导出。");
+                            }
+                        }
+                        free(txt);
+                    }
+                }
+            }
+        }
+    }
+}
+
 static void DiagLayout(void)
 {
     if (!s_diagDlg)
@@ -1360,18 +1565,27 @@ static LRESULT CALLBACK DiagProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_COMMAND:
         if (LOWORD(wp) == 1) { /* 生成按钮 */
-            /* TODO WP5-T5.4: 组装全局快照 → PROMPT_DIAG_GLOBAL → AiStartAnalysis */
-            SetWindowTextW(s_diagStatus, L"诊断快照生成中…（kilo 无头执行，约 1~3 分钟）");
-            SetWindowTextW(s_diagEdit,
-                L"等待 kilo 返回…\r\n\r\n"
-                L"诊断报告将包含四节：\r\n"
-                L"  1. 发现问题清单（信息/警告/高危）\r\n"
-                L"  2. 推测根因\r\n"
-                L"  3. 处理建议\r\n"
-                L"  4. 可执行动作\r\n\r\n"
-                L"提示：本功能需要 kilo 已登录。");
+            if (s_diagPending) {
+                SetWindowTextW(s_diagStatus, L"诊断进行中，请等待…");
+                return 0;
+            }
+            {
+                WCHAR context[16384];
+                WCHAR prompt[18432];
+                DiagBuildContext(context, 16384);
+                StringCchPrintfW(prompt, 18432,
+                                 AiGetPrompt(AIPROMPT_DIAG_GLOBAL), context);
+                s_diagPending = TRUE;
+                SetWindowTextW(s_diagStatus,
+                    L"AI 全局诊断中…（kilo 无头执行，约 1~3 分钟）");
+                SetWindowTextW(s_diagEdit, L"等待 kilo 返回…");
+                if (!AiStartAnalysis(g_app.hMain, prompt)) {
+                    s_diagPending = FALSE;
+                    SetWindowTextW(s_diagStatus, L"启动诊断失败。");
+                }
+            }
         } else if (LOWORD(wp) == 2) { /* 导出 */
-            /* TODO WP5-T5.6: EM_GETTEXTEX → 保存 .md */
+            DiagExport();
         }
         return 0;
     case WM_CLOSE:
@@ -1455,6 +1669,15 @@ void ActionsAiDiagOpen(HWND hwnd)
     ShowWindow(s_diagDlg, SW_SHOW);
     UpdateWindow(s_diagDlg);
     DiagLayout();
+}
+
+void ActionsDiagCheckPending(WPARAM wp, LPARAM lp)
+{
+    (void)wp;
+    if (s_diagPending) {
+        AiResult *r = (AiResult *)lp;
+        DiagApplyResult(r);
+    }
 }
 
 void ActionsAiMenuCommand(HWND hwnd)
