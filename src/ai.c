@@ -489,7 +489,147 @@ typedef struct {
     WCHAR *prompt;
 } AiTask;
 
-static volatile BOOL s_busy = FALSE;
+static BOOL s_busy = FALSE;
+
+/* ---------------- WP1: Prompt 模板表 ---------------- */
+
+static const WCHAR *const kPrompts[AIPROMPT_COUNT] = {
+    /* AIPROMPT_RISK_SINGLE：单进程风险评估（自由 Markdown，现有行为） */
+    L"你是Windows进程管理专家。分析以下进程并评估终止它的风险，"
+    L"用中文分点简洁回答（300字内）："
+    L"1)该进程是什么（服务/程序/常见用途）；"
+    L"2)终止风险评级：低/中/高；"
+    L"3)评级依据（系统关键性、父进程关系、未保存数据丢失、是否会自动重启、"
+    L"对监听服务的影响）；4)建议操作。"
+    L"进程信息：%ls。",
+
+    /* AIPROMPT_RISK_BATCH：批量风险分级（严格 JSON，供表格风险列） */
+    L"你是Windows进程风险分析专家。对下列每个进程给出终止风险分级。"
+    L"必须只输出一个JSON数组，不要任何其他文字，格式：\n"
+    L"[{\"pid\":123,\"level\":\"低|中|高|未知\",\"reason\":\"一句话理由\"}]\n"
+    L"分级依据：系统关键性（系统进程=高）、是否承载服务/监听端口、"
+    L"父进程关系、用户数据丢失风险。进程清单（制表符分隔：PID 名称 内存KB "
+    L"类型 命令行 监听端口）：\n%ls",
+
+    /* AIPROMPT_LOG_REVIEW：日志复盘（Markdown 报告） */
+    L"你是Node.js/Python开发运维专家。分析以下进程终止审计日志，"
+    L"用中文输出Markdown复盘报告，包含三节：\n"
+    L"## 高频异常模式（哪些进程/项目反复被终止、孤儿频发）\n"
+    L"## 终止失败根因（权限不足/系统保护/进程已退出等分类统计）\n"
+    L"## 开发侧改进建议（脚本退出逻辑、IDE配置、清理策略）\n"
+    L"仅针对Node/Python开发场景，500字内。日志（制表符分隔："
+    L"时间 来源 进程名 PID 结果 路径）：\n%ls",
+
+    /* AIPROMPT_DIAG_GLOBAL：全局诊断（四区块+动作清单） */
+    L"你是Windows开发环境诊断专家。基于以下系统快照输出Markdown诊断报告，"
+    L"必须包含四节：\n"
+    L"## 发现问题清单（每项标注级别：信息/警告/高危）\n"
+    L"## 推测根因\n## 处理建议\n"
+    L"## 可执行动作\n"
+    L"最后另起一行输出动作清单JSON（供工具解析按钮）：\n"
+    L"ACTIONS:[{\"action\":\"clean_orphans\"},"
+    L"{\"action\":\"fix_winnat\",\"port\":1234},"
+    L"{\"action\":\"goto\",\"view\":\"proc\",\"pid\":5678}]\n"
+    L"面向Node/Python开发故障。系统快照：\n%ls",
+
+    /* AIPROMPT_AI_QUERY：CLI 自然语言查询（JSON 输出） */
+    L"你是Windows进程查询助手。基于以下系统快照回答用户问题。"
+    L"必须只输出一个JSON对象，格式：\n"
+    L"{\"answer\":\"一句话回答\",\"pids\":[相关PID],\"analysis\":\"分析\"}\n"
+    L"用户问题：%ls\n系统快照：\n%ls",
+
+    /* AIPROMPT_PORT_SUGGEST：CLI 端口故障分析 */
+    L"你是Windows网络诊断专家。分析端口 %lu 的故障原因。"
+    L"必须只输出一个JSON对象：\n"
+    L"{\"root_cause\":\"根因\",\"evidence\":\"依据\",\"fix_steps\":[\"步骤1\",\"步骤2\"]}\n"
+    L"端口状态与系统上下文：%ls",
+};
+
+const WCHAR *AiGetPrompt(AiPromptId id)
+{
+    if ((int)id < 0 || id >= AIPROMPT_COUNT)
+        return kPrompts[AIPROMPT_RISK_SINGLE];
+    return kPrompts[id];
+}
+
+/* ---------------- WP1: JSON 提取器 ---------------- */
+
+WCHAR *AiExtractJson(const WCHAR *answer)
+{
+    const WCHAR *start = NULL;
+    const WCHAR *p;
+    int depth = 0;
+    BOOL inStr = FALSE;
+    const WCHAR *end = NULL;
+
+    if (!answer)
+        return NULL;
+
+    /* 扫描：定位首个 { 或 [ 之后与之配对的闭合位置（字符串感知） */
+    for (p = answer; *p; p++) {
+        if (inStr) {
+            if (*p == L'\\' && p[1]) {
+                p++; /* 跳过转义字符 */
+                continue;
+            }
+            if (*p == L'"')
+                inStr = FALSE;
+            continue;
+        }
+        if (*p == L'"') {
+            inStr = TRUE;
+            continue;
+        }
+        if (*p == L'{' || *p == L'[') {
+            if (depth == 0)
+                start = p;
+            depth++;
+        } else if (*p == L'}' || *p == L']') {
+            if (depth > 0) {
+                depth--;
+                if (depth == 0 && start) {
+                    end = p;
+                    break; /* 首个完整顶层 JSON 已闭合 */
+                }
+            }
+        }
+    }
+    if (!start || !end || end <= start)
+        return NULL;
+
+    {
+        size_t n = (size_t)(end - start) + 1;
+        WCHAR *out = (WCHAR *)malloc((n + 1) * sizeof(WCHAR));
+        if (!out)
+            return NULL;
+        memcpy(out, start, n * sizeof(WCHAR));
+        out[n] = L'\0';
+        return out;
+    }
+}
+
+/* ---------------- WP1: 上下文限流 ---------------- */
+
+size_t AiTruncateContext(WCHAR *buf, size_t maxChars)
+{
+    size_t len;
+
+    if (!buf)
+        return 0;
+    len = lstrlenW(buf);
+    if (len <= maxChars)
+        return len;
+
+    /* 在 maxChars 内找最后一个换行，整行截断避免撕裂字段 */
+    size_t cut = maxChars;
+    while (cut > 0 && buf[cut - 1] != L'\n')
+        cut--;
+    if (cut == 0)
+        cut = maxChars; /* 无换行则硬截 */
+    buf[cut] = L'\0';
+    StringCchCatW(buf, maxChars + 40, L"\n…（上下文超限已截断）\n");
+    return lstrlenW(buf);
+}
 
 static DWORD WINAPI AiThreadProc(LPVOID param)
 {
