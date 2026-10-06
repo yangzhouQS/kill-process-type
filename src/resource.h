@@ -16,6 +16,7 @@
 #define IDM_TRAY_EXIT      1105
 #define IDM_TRAY_AUTOSTART 1106
 #define IDM_TRAY_SETTINGS  1107
+#define IDM_TRAY_ORPHAN    1108
 
 /* 主窗口控件 ID */
 #define IDC_BTN_REFRESH   2001
@@ -26,12 +27,19 @@
 #define IDC_LIST          2006
 #define IDC_EDIT_FILTER   2007
 #define IDC_TAB           2008
+#define IDC_CHK_TREE      2010
+#define IDC_BTN_AI_LOG    2011
 
 /* 列表行右键菜单命令 */
 #define IDM_LIST_COPY_PATH  2101
 #define IDM_LIST_COPY_FIX   2102
 #define IDM_LIST_ELEVATE_FIX 2103
 #define IDM_LIST_AI_ANALYZE 2104
+#define IDM_LIST_OPEN_URL   2105
+#define IDM_LIST_COPY_URL   2106
+#define IDM_LIST_SHOW_IN_EXPLORER 2107
+#define IDM_LIST_COPY_CMD   2108
+#define IDM_LIST_OPEN_IN_TERMINAL 2109
 
 /* AI 评估对话框控件 */
 #define IDAI_KILL  2201
@@ -48,8 +56,14 @@
 #define IDC_SET_BALLOON     2308
 #define IDC_SET_CLOSE       2309
 
+/* 设置窗口：孤儿进程清理 */
+#define IDC_SET_ORPHANEN  2310
+#define IDC_SET_ORPHANIV  2311
+#define IDC_SET_ORPHANNP  2312
+
 /* 自定义消息与定时器（需 windows.h，务必在 common.h 之后包含） */
 #define WM_APP_TRAY (WM_APP + 1)
 #define TIMER_AUTO_REFRESH 1
+#define TIMER_ORPHAN 2     /* 孤儿进程定时清理（分钟级） */
 
 #endif

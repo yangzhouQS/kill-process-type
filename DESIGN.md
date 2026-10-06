@@ -152,6 +152,16 @@ UI 测试需先编译剪贴板读取器：`gcc -O2 -o build\clipread.exe tests\c
 
 ## 8. 更新日志
 
+- **v5.2-WP2+WP4（2026-10-06）**：
+  **WP2 日志复盘**——日志页签新增「AI 复盘日志」按钮（切到日志页签时
+  出现），勾选日志行→PROMPT_LOG_REVIEW→AI 报告窗口（复用评估对话框机制，
+  无终止按钮），上限 100 条防上下文过载，超限截断标注；
+  **WP4 CLI AI 接口**——`/ai-query "问题"` 或 `@file.txt` 文件入参
+  （规避中文/引号截断），同步调 kilo（CLI 阻塞可接受），AiExtractJson
+  结构化提取；`/ai-suggest <port>` 端口故障分析，无 AI 时降级本地规则
+  版（保留区间→EACCES 话术，进程占用→kill 建议）；kilo 技能文档仓库内
+  副本 docs/skills/SKILL.md + 全局目录同步（四类意图：查询/分析/策略/
+  执行，执行类强制人工确认）。
 - **v5.2-WP1（2026-10-06）**：AI 核心层扩展（推敲定稿 v2.0 首个工作包）——
   6 套 Prompt 模板（AiPromptId：单风险/批量分级/日志复盘/全局诊断/CLI 查询/
   端口分析）；AiExtractJson 结构化提取器（括号配对+字符串感知，围栏/裸输出

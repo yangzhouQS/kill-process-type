@@ -11,6 +11,8 @@
 #include "app.h"
 #include "resource.h"
 #include "config.h"
+#include "klog.h"
+#include "peb.h"
 #include "startup.h"
 #include "theme.h"
 #include "tray.h"
@@ -23,12 +25,22 @@
 
 static void ElevatedFixForRow(HWND owner, int rowIdx); /* 前向声明（见提权修复节） */
 
-static void DoKillPids(DWORD *pids, size_t n)
+static void DoKillPidsEx(const WCHAR *source, DWORD *pids,
+                         const ProcInfo *const *infos, size_t n)
 {
     KillResult kr;
+    DWORD *errs = (DWORD *)malloc((n ? n : 1) * sizeof(DWORD));
 
-    KillPids(pids, n, &kr);
+    KillPids(pids, n, &kr, errs);
     ViewsRescan();
+
+    /* 逐条落日志（infos[i] 可为 NULL） */
+    if (errs) {
+        for (size_t i = 0; i < n; i++)
+            KlogWrite(source, infos ? infos[i] : NULL, pids[i],
+                      errs[i] == 0, errs[i]);
+        free(errs);
+    }
 
     WCHAR text[128];
     StringCchPrintfW(text, 128, L"已终止 %d/%d 个进程。", kr.okCount, (int)n);
@@ -38,10 +50,26 @@ static void DoKillPids(DWORD *pids, size_t n)
         MessageBoxW(NULL, kr.failDetail, L"部分进程终止失败", MB_OK | MB_ICONWARNING);
 }
 
+/* 在缓存中按 PID 查 ProcInfo（勾选清理取名称/路径用），找不到返回 NULL */
+static const ProcInfo *FindInfoByPid(DWORD pid)
+{
+    if (g_app.mode != MODE_PORT) {
+        for (size_t i = 0; i < g_app.procs.count; i++)
+            if (g_app.procs.items[i].pid == pid)
+                return &g_app.procs.items[i];
+    } else {
+        for (size_t i = 0; i < g_app.rowCount; i++)
+            if (g_app.rows[i].found && g_app.rows[i].pid == pid)
+                return &g_app.rows[i].proc;
+    }
+    return NULL;
+}
+
 void ActionsKillAllOfType(ProcType t)
 {
     ProcList tmp;
     DWORD *pids;
+    const ProcInfo **infos;
     size_t n = 0;
     WCHAR msg[128];
 
@@ -49,19 +77,27 @@ void ActionsKillAllOfType(ProcType t)
     if (ScanProcesses(&tmp) < 0)
         return;
     pids = (DWORD *)malloc((tmp.count ? tmp.count : 1) * sizeof(DWORD));
-    if (!pids) {
+    infos = (const ProcInfo **)malloc((tmp.count ? tmp.count : 1) * sizeof(const ProcInfo *));
+    if (!pids || !infos) {
+        free(pids);
+        free(infos);
         FreeProcList(&tmp);
         MessageBoxW(NULL, L"内存分配失败。", L"错误", MB_OK | MB_ICONERROR);
         return;
     }
-    for (size_t i = 0; i < tmp.count; i++)
-        if (tmp.items[i].type == t)
-            pids[n++] = tmp.items[i].pid;
+    for (size_t i = 0; i < tmp.count; i++) {
+        if (tmp.items[i].type == t) {
+            pids[n] = tmp.items[i].pid;
+            infos[n] = &tmp.items[i];
+            n++;
+        }
+    }
     int total = (int)n;
-    FreeProcList(&tmp);
 
     if (total == 0) {
         free(pids);
+        free(infos);
+        FreeProcList(&tmp);
         MessageBoxW(NULL, L"未发现该类型的进程。", L"提示", MB_OK | MB_ICONINFORMATION);
         return;
     }
@@ -70,10 +106,14 @@ void ActionsKillAllOfType(ProcType t)
     if (MessageBoxW(NULL, msg, L"操作确认",
                     MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
         free(pids);
+        free(infos);
+        FreeProcList(&tmp);
         return;
     }
-    DoKillPids(pids, n);
+    DoKillPidsEx(L"类型清理", pids, infos, n); /* tmp 此时仍存活，infos 指针有效 */
     free(pids);
+    free(infos);
+    FreeProcList(&tmp);
 }
 
 void ActionsKillSelected(void)
@@ -93,7 +133,10 @@ void ActionsKillSelected(void)
         return;
     }
     pids = (DWORD *)malloc((size_t)checked * sizeof(DWORD));
-    if (!pids) {
+    const ProcInfo **infos = (const ProcInfo **)malloc((size_t)checked * sizeof(const ProcInfo *));
+    if (!pids || !infos) {
+        free(pids);
+        free(infos);
         MessageBoxW(NULL, L"内存分配失败。", L"错误", MB_OK | MB_ICONERROR);
         return;
     }
@@ -118,13 +161,17 @@ void ActionsKillSelected(void)
                         dup = TRUE;
                         break;
                     }
-                if (!dup)
-                    pids[n++] = pid;
+                if (!dup) {
+                    pids[n] = pid;
+                    infos[n] = FindInfoByPid(pid);
+                    n++;
+                }
             }
         }
     }
     if (n == 0 && reservedCnt > 0) {
         free(pids);
+        free(infos);
         if (MessageBoxW(NULL,
                 L"选中端口属于 Windows 保留区间（winnat / Hyper-V 动态保留），\n"
                 L"没有对应进程可结束，杀进程无法释放。\n\n"
@@ -141,11 +188,13 @@ void ActionsKillSelected(void)
         if (MessageBoxW(NULL, msg, L"操作确认",
                         MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
             free(pids);
+            free(infos);
             return;
         }
     }
-    DoKillPids(pids, n);
+    DoKillPidsEx(L"勾选清理", pids, infos, n);
     free(pids);
+    free(infos);
 }
 
 /* ---------------- 复制可执行路径 ---------------- */
@@ -194,10 +243,20 @@ static BOOL IsPlaceholderCell(const WCHAR *s)
 void ActionsCopySelectedPaths(HWND owner)
 {
     WCHAR buf[8192];
-    int pathCol = (g_app.mode == MODE_PORT) ? 6 : 5;
-    int nameCol = (g_app.mode == MODE_PORT) ? 3 : 0;
+    int pathCol, nameCol;
     int idx = -1;
     int copied = 0;
+
+    if (g_app.mode == MODE_PORT) {
+        pathCol = 6;
+        nameCol = 3;
+    } else if (g_app.mode == MODE_LOG) {
+        pathCol = 5;
+        nameCol = 2;
+    } else {
+        pathCol = 5;
+        nameCol = 0;
+    }
 
     if (!g_app.hList)
         return;
@@ -227,9 +286,14 @@ void ActionsCopySelectedPaths(HWND owner)
 
 /* ---------------- 列表行右键菜单 ---------------- */
 
-/* 右键命中保留区间行/普通进程行时的行索引（供修复与 AI 分析命令使用） */
+/* 右键命中行的行索引（供 AI 分析/Dev 快捷操作使用） */
 static int s_fixRowIndex = -1;
 static int s_aiRowIndex = -1;
+
+int ActionsGetContextRow(void)
+{
+    return s_aiRowIndex;
+}
 
 /* 复制 winnat 保留端口的修复命令块（从 s_fixRowIndex 行取端口区间） */
 void ActionsCopyFix(HWND owner)
@@ -274,6 +338,93 @@ void ActionsCopyFix(HWND owner)
         TrayShowBalloon(MAIN_WINDOW_TITLE,
                         L"已复制修复命令，请在管理员终端粘贴执行。");
     s_fixRowIndex = -1;
+}
+
+/* ---------------- 孤儿进程清理 ---------------- */
+
+/* 孤儿 = 父进程已退出仍存活的残留进程（典型：IDE/npm 崩溃后遗留的
+ * node/python worker）。定时静默清理仅默认面向 Node/Python，安全可控。 */
+void ActionsCleanOrphans(BOOL autoMode)
+{
+    ProcList orphans;
+    DWORD *pids;
+    size_t n = 0;
+    BOOL nodePyOnly;
+
+    nodePyOnly = ConfigGetBool(L"OrphanNodePyOnly", TRUE);
+    ZeroMemory(&orphans, sizeof(orphans));
+    if (ScanOrphanProcesses(&orphans, nodePyOnly) < 0) {
+        if (!autoMode)
+            MessageBoxW(NULL, L"进程快照创建失败，请稍后重试。", L"提示",
+                        MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (orphans.count == 0) {
+        if (!autoMode)
+            MessageBoxW(NULL, nodePyOnly
+                              ? L"未发现 Node/Python 孤儿进程。"
+                              : L"未发现孤儿进程。",
+                        L"提示", MB_OK | MB_ICONINFORMATION);
+        FreeProcList(&orphans);
+        return;
+    }
+
+    pids = (DWORD *)malloc(orphans.count * sizeof(DWORD));
+    if (!pids) {
+        FreeProcList(&orphans);
+        return;
+    }
+
+    if (!autoMode) {
+        /* 手动：列出受害者清单确认 */
+        WCHAR list[1024];
+        size_t used = 0;
+        list[0] = L'\0';
+        for (size_t i = 0; i < orphans.count && used + 64 < 1024; i++) {
+            WCHAR line[64];
+            StringCchPrintfW(line, 64, L"· %ls（PID %lu）\r\n",
+                             orphans.items[i].name, (unsigned long)orphans.items[i].pid);
+            StringCchCatW(list, 1024, line);
+            used = lstrlenW(list);
+        }
+        {
+            WCHAR msg[1150];
+            StringCchPrintfW(msg, 1150,
+                             L"发现 %d 个孤儿进程（父进程已退出）：\r\n\r\n%ls\r\n"
+                             L"确定全部终止？", (int)orphans.count, list);
+            if (MessageBoxW(NULL, msg, L"清理孤儿进程",
+                            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+                free(pids);
+                FreeProcList(&orphans);
+                return;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < orphans.count; i++)
+        pids[n++] = orphans.items[i].pid;
+
+    {
+        KillResult kr;
+        DWORD *errs = (DWORD *)malloc((n ? n : 1) * sizeof(DWORD));
+        WCHAR text[128];
+        KillPids(pids, n, &kr, errs);
+        ConfigSetLong(L"OrphanLastClean", (LONG)GetTickCount64() / 1000);
+        if (errs) {
+            for (size_t i = 0; i < n; i++)
+                KlogWrite(autoMode ? L"孤儿·定时" : L"孤儿·手动",
+                          &orphans.items[i], pids[i], errs[i] == 0, errs[i]);
+            free(errs);
+        }
+        StringCchPrintfW(text, 128, L"%ls清理孤儿进程：已终止 %d/%d 个。",
+                         autoMode ? L"定时" : L"手动", kr.okCount, (int)n);
+        TrayShowBalloon(MAIN_WINDOW_TITLE, text);
+        if (kr.failCount > 0)
+            MessageBoxW(NULL, kr.failDetail, L"部分孤儿进程终止失败",
+                        MB_OK | MB_ICONWARNING);
+    }
+    FreeProcList(&orphans); /* 日志已取完信息，再释放 */
+    free(pids);
 }
 
 /* ---------------- 一键提权修复（UAC + 管理员 cmd 内执行） ---------------- */
@@ -442,10 +593,25 @@ void ActionsOnListContextMenu(HWND hwnd, LPARAM lp)
                 AppendMenuW(m, MF_STRING, IDM_LIST_COPY_FIX,
                             L"仅复制修复命令");
                 AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+            } else if ((DWORD)it.lParam != 0 && g_app.mode == MODE_PORT) {
+                /* 端口监听行：快捷访问 URL */
+                AppendMenuW(m, MF_STRING, IDM_LIST_OPEN_URL,
+                            L"浏览器打开 http://localhost:端口");
+                AppendMenuW(m, MF_STRING, IDM_LIST_COPY_URL, L"复制 URL");
+                AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+                s_aiRowIndex = idx;
+                AppendMenuW(m, MF_STRING, IDM_LIST_AI_ANALYZE,
+                            L"AI 风险评估（kilo）");
+                AppendMenuW(m, MF_SEPARATOR, 0, NULL);
             } else if ((DWORD)it.lParam != 0) {
                 s_aiRowIndex = idx;
                 AppendMenuW(m, MF_STRING, IDM_LIST_AI_ANALYZE,
                             L"AI 风险评估（kilo）");
+                AppendMenuW(m, MF_STRING, IDM_LIST_COPY_CMD, L"复制完整命令行");
+                AppendMenuW(m, MF_STRING, IDM_LIST_OPEN_IN_TERMINAL,
+                            L"在终端打开所在目录");
+                AppendMenuW(m, MF_STRING, IDM_LIST_SHOW_IN_EXPLORER,
+                            L"在资源管理器中显示");
                 AppendMenuW(m, MF_SEPARATOR, 0, NULL);
             }
         }
@@ -455,6 +621,106 @@ void ActionsOnListContextMenu(HWND hwnd, LPARAM lp)
     TrackPopupMenu(m, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
     PostMessageW(hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
+}
+
+/* ---------------- Dev 快捷操作（URL/目录/命令行） ---------------- */
+
+/* 从端口视图行取端口号（列 0 文本 "8080"），失败返回 0 */
+static DWORD GetRowPort(int rowIdx)
+{
+    WCHAR cell[16];
+    WCHAR *end = NULL;
+    unsigned long v;
+
+    ListView_GetItemText(g_app.hList, rowIdx, 0, cell, 16);
+    v = wcstoul(cell, &end, 10);
+    if (end == cell || v == 0 || v > 65535)
+        return 0;
+    return (DWORD)v;
+}
+
+void OpenRowUrl(HWND owner, BOOL copyOnly)
+{
+    DWORD port = GetRowPort(s_aiRowIndex);
+    WCHAR url[80];
+
+    if (!port)
+        return;
+    StringCchPrintfW(url, 80, L"http://localhost:%lu", (unsigned long)port);
+    if (copyOnly) {
+        if (CopyTextToClipboard(owner, url))
+            TrayShowBalloon(MAIN_WINDOW_TITLE, L"已复制 URL。");
+    } else {
+        ShellExecuteW(owner, L"open", url, NULL, NULL, SW_SHOWNORMAL);
+    }
+}
+
+/* 行的路径列文本（按视图取列号） */
+static BOOL GetRowPath(int rowIdx, WCHAR *buf, size_t cch)
+{
+    int pathCol = (g_app.mode == MODE_PORT) ? 6 : 5;
+
+    ListView_GetItemText(g_app.hList, rowIdx, pathCol, buf, (int)cch);
+    return buf[0] && wcscmp(buf, L"-") != 0 && wcscmp(buf, L"(无法读取)") != 0;
+}
+
+void ShowRowInExplorer(int rowIdx)
+{
+    WCHAR path[MAX_PATH + 8];
+    WCHAR args[MAX_PATH + 16];
+
+    if (!GetRowPath(rowIdx, path, MAX_PATH + 8))
+        return;
+    StringCchPrintfW(args, MAX_PATH + 16, L"/select,\"%ls\"", path);
+    ShellExecuteW(NULL, L"open", L"explorer.exe", args, NULL, SW_SHOWNORMAL);
+}
+
+void OpenRowTerminal(int rowIdx)
+{
+    LVITEMW it;
+    WCHAR cwd[MAX_PATH];
+    WCHAR args[MAX_PATH + 32];
+
+    ZeroMemory(&it, sizeof(it));
+    it.mask = LVIF_PARAM;
+    it.iItem = rowIdx;
+    if (!ListView_GetItem(g_app.hList, &it) || (DWORD)it.lParam == 0)
+        return;
+    if (!PebQuery((DWORD)it.lParam, NULL, 0, cwd, MAX_PATH) || !cwd[0]) {
+        /* PEB 不可读时退回可执行目录 */
+        WCHAR path[MAX_PATH];
+        WCHAR *slash;
+        if (!GetRowPath(rowIdx, path, MAX_PATH))
+            return;
+        slash = wcsrchr(path, L'\\');
+        if (slash)
+            *slash = L'\0';
+        StringCchCopyW(cwd, MAX_PATH, path);
+    }
+    if (!cwd[0])
+        return;
+    StringCchPrintfW(args, MAX_PATH + 32, L"/K cd /d \"%ls\"", cwd);
+    ShellExecuteW(NULL, L"open", L"cmd.exe", args, NULL, SW_SHOWNORMAL);
+}
+
+void CopyRowCmdline(HWND owner, int rowIdx)
+{
+    LVITEMW it;
+    WCHAR cmd[1024];
+    WCHAR cwd[MAX_PATH];
+
+    ZeroMemory(&it, sizeof(it));
+    it.mask = LVIF_PARAM;
+    it.iItem = rowIdx;
+    if (!ListView_GetItem(g_app.hList, &it) || (DWORD)it.lParam == 0)
+        return;
+    if (!PebQuery((DWORD)it.lParam, cmd, 1024, cwd, MAX_PATH) || !cmd[0]) {
+        MessageBoxW(NULL, L"无法读取该进程命令行（权限不足或进程已退出）。",
+                    L"提示", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (CopyTextToClipboard(owner, cmd))
+        TrayShowBalloon(MAIN_WINDOW_TITLE, L"已复制完整命令行。");
 }
 
 /* ---------------- AI 风险评估（kilo 无头调用） ---------------- */
@@ -547,8 +813,10 @@ static LRESULT CALLBACK AiDlgProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 if (MessageBoxW(hwnd, msg2, L"操作确认",
                                 MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) == IDYES) {
                     DWORD pid = s_aiPid;
+                    const ProcInfo *one[1];
+                    one[0] = FindInfoByPid(pid);
                     DestroyWindow(hwnd);
-                    DoKillPids(&pid, 1);
+                    DoKillPidsEx(L"AI评估", &pid, one, 1);
                 }
             }
             break;
@@ -745,6 +1013,149 @@ void ActionsAiDone(WPARAM wp, LPARAM lp)
     }
     s_aiStartTick = 0;
     AiResultFree(r);
+}
+
+/* ---------------- WP2: 日志页签 AI 复盘 ---------------- */
+
+void ActionsAiLogReview(HWND hwnd)
+{
+    int cnt, checked = 0;
+    WCHAR context[8192];
+    WCHAR prompt[12288];
+    WCHAR title[128];
+    size_t ctxLen = 0;
+    int collected = 0;
+
+    (void)hwnd;
+    if (AiBusy())
+        return;
+    if (!g_app.hList || g_app.mode != MODE_LOG)
+        return;
+
+    /* 收集勾选日志行（上限 100 条，防 kilo 上下文过载） */
+    context[0] = L'\0';
+    cnt = ListView_GetItemCount(g_app.hList);
+    for (int i = 0; i < cnt && collected < 100; i++) {
+        if (!ListView_GetCheckState(g_app.hList, i))
+            continue;
+        checked++;
+        if (collected >= 100)
+            break;
+        {
+            WCHAR line[512];
+            WCHAR time[32], src[32], name[64], pid[16], result[16], path[MAX_PATH];
+            ListView_GetItemText(g_app.hList, i, 0, time, 32);
+            ListView_GetItemText(g_app.hList, i, 1, src, 32);
+            ListView_GetItemText(g_app.hList, i, 2, name, 64);
+            ListView_GetItemText(g_app.hList, i, 3, pid, 16);
+            ListView_GetItemText(g_app.hList, i, 4, result, 16);
+            ListView_GetItemText(g_app.hList, i, 5, path, MAX_PATH);
+            StringCchPrintfW(line, 512, L"%ls\t%ls\t%ls\t%ls\t%ls\t%ls\r\n",
+                             time, src, name, pid, result, path);
+            if (ctxLen + lstrlenW(line) < 8192 - 64) {
+                StringCchCatW(context, 8192, line);
+                ctxLen = lstrlenW(context);
+            }
+            collected++;
+        }
+    }
+    if (checked == 0) {
+        MessageBoxW(NULL, L"请先勾选要复盘的日志条目。", L"提示",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    if (checked > 100)
+        StringCchCatW(context, 8192, L"…（超出100条已截断）\r\n");
+
+    /* 组装 Prompt */
+    StringCchPrintfW(prompt, 12288, AiGetPrompt(AIPROMPT_LOG_REVIEW), context);
+    AiTruncateContext(prompt, 12288);
+
+    /* 保存提示词副本 */
+    free(s_aiPrompt);
+    s_aiPrompt = NULL;
+    {
+        size_t plen = (size_t)lstrlenW(prompt) + 1;
+        s_aiPrompt = (WCHAR *)malloc(plen * sizeof(WCHAR));
+        if (s_aiPrompt)
+            StringCchCopyW(s_aiPrompt, plen, prompt);
+    }
+
+    /* 创建报告窗口（复用 AI 评估对话框机制，s_aiPid=0 隐藏终止按钮） */
+    if (s_aiDlg)
+        DestroyWindow(s_aiDlg);
+    {
+        WNDCLASSEXW wc;
+        static BOOL registered = FALSE;
+        if (!registered) {
+            ZeroMemory(&wc, sizeof(wc));
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = AiDlgProc;
+            wc.hInstance = g_app.hInst;
+            wc.hIcon = LoadIconW(g_app.hInst, MAKEINTRESOURCEW(IDI_APP));
+            wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
+            wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+            wc.lpszClassName = AI_DLG_CLASS;
+            if (RegisterClassExW(&wc))
+                registered = TRUE;
+        }
+    }
+    StringCchPrintfW(title, 128, L"AI 日志复盘（%d 条记录）", collected);
+    s_aiPid = 0; /* 无终止按钮 */
+    {
+        int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+        if (g_app.hMain) {
+            RECT rm;
+            GetWindowRect(g_app.hMain, &rm);
+            x = rm.left + AppScale(80);
+            y = rm.top + AppScale(50);
+        }
+        s_aiDlg = CreateWindowExW(0, AI_DLG_CLASS, title,
+                                  WS_OVERLAPPEDWINDOW,
+                                  x, y, AppScale(560), AppScale(440),
+                                  g_app.hMain, NULL, g_app.hInst, NULL);
+    }
+    if (!s_aiDlg)
+        return;
+    s_aiKillBtn = CreateWindowExW(0, L"BUTTON", L"终止该进程",
+                                  WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                  0, 0, AppScale(130), AppScale(30),
+                                  s_aiDlg, (HMENU)(INT_PTR)IDAI_KILL, g_app.hInst, NULL);
+    EnableWindow(s_aiKillBtn, FALSE); /* 日志复盘无终止 */
+    s_aiStatus = CreateWindowExW(0, L"STATIC",
+                                 L"AI 复盘中…（kilo 无头执行，约 0.5~2 分钟）",
+                                 WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP,
+                                 0, 0, AppScale(300), AppScale(30),
+                                 s_aiDlg, NULL, g_app.hInst, NULL);
+    s_aiEdit = RichTextCreate(s_aiDlg, 0);
+    if (s_aiEdit)
+        SetWindowTextW(s_aiEdit,
+            L"等待 kilo 返回…\r\n\r\n分析完成后将在此展示复盘报告。");
+    else
+        s_aiEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT",
+                                   L"等待 kilo 返回…",
+                                   WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+                                       ES_MULTILINE | ES_READONLY,
+                                   0, 0, 100, 100, s_aiDlg, NULL, g_app.hInst, NULL);
+    if (g_app.hFont) {
+        SendMessageW(s_aiEdit, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        SendMessageW(s_aiStatus, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+        SendMessageW(s_aiKillBtn, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+    }
+    ShowWindow(s_aiDlg, SW_SHOW);
+    UpdateWindow(s_aiDlg);
+    AiDlgLayout(s_aiDlg);
+    ThemeApplyFrame(s_aiDlg);
+    InvalidateRect(s_aiDlg, NULL, TRUE);
+
+    s_aiStartTick = GetTickCount64();
+    SetTimer(s_aiDlg, AI_DLG_TIMER, 1000, NULL);
+    if (!AiStartAnalysis(g_app.hMain, prompt)) {
+        KillTimer(s_aiDlg, AI_DLG_TIMER);
+        s_aiStartTick = 0;
+        SetWindowTextW(s_aiStatus, L"启动分析失败。");
+        SetWindowTextW(s_aiEdit, L"无法启动 kilo 分析任务。");
+    }
 }
 
 void ActionsAiMenuCommand(HWND hwnd)

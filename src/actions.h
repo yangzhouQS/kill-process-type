@@ -19,6 +19,10 @@ void ActionsCopyFix(HWND owner);
 /* 一键提权修复保留端口（UAC 确认后自动执行 winnat 重启 + 端口固定） */
 void ActionsElevatedFix(HWND owner);
 
+/* 孤儿进程清理：autoMode=TRUE 定时静默清理（气泡汇总），
+ * FALSE 手动触发（无孤儿提示/有孤儿列清单确认） */
+void ActionsCleanOrphans(BOOL autoMode);
+
 /* AI 风险评估：右键菜单入口（rowIndex 来自右键命中行） */
 void ActionsAiAnalyze(int rowIndex);
 void ActionsAiMenuCommand(HWND hwnd);
@@ -31,5 +35,17 @@ void ActionsAiOnThemeChanged(void);
 
 /* 列表行右键菜单（WM_CONTEXTMENU 路由入口） */
 void ActionsOnListContextMenu(HWND hwnd, LPARAM lp);
+
+/* 日志页签 AI 复盘：收集勾选日志行→PROMPT_LOG_REVIEW→报告窗口 */
+void ActionsAiLogReview(HWND hwnd);
+
+/* Dev 快捷操作（右键菜单项，gui.c 路由） */
+void OpenRowUrl(HWND owner, BOOL copyOnly);
+void ShowRowInExplorer(int rowIdx);
+void OpenRowTerminal(int rowIdx);
+void CopyRowCmdline(HWND owner, int rowIdx);
+
+/* 取最近一次右键命中的行索引（Dev 快捷操作定位用） */
+int ActionsGetContextRow(void);
 
 #endif

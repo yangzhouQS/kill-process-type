@@ -39,6 +39,8 @@ static const struct {
 App g_app;
 
 static HWND s_hBtn[BTN_COUNT];
+static HWND g_hChkTree;
+static HWND g_hBtnAiLog; /* WP2: 日志复盘按钮（仅日志页签可见） */
 
 /* 主窗口全部控件的主题应用（启动与热切换时调用） */
 static void ApplyThemeAll(void)
@@ -60,12 +62,23 @@ static void ApplyThemeAll(void)
 static void ResetAutoTimer(HWND hwnd)
 {
     LONG interval = ConfigGetLong(L"AutoRefreshInterval", 10);
+    LONG orphanMin;
 
     if (interval < 3)
         interval = 3;
     if (interval > 3600)
         interval = 3600;
     SetTimer(hwnd, TIMER_AUTO_REFRESH, (UINT)(interval * 1000), NULL);
+
+    orphanMin = ConfigGetLong(L"OrphanIntervalMin", 30);
+    if (orphanMin < 1)
+        orphanMin = 1;
+    if (orphanMin > 1440)
+        orphanMin = 1440;
+    if (ConfigGetBool(L"OrphanAutoEnable", FALSE))
+        SetTimer(hwnd, TIMER_ORPHAN, (UINT)(orphanMin * 60000), NULL);
+    else
+        KillTimer(hwnd, TIMER_ORPHAN);
 }
 
 void GuiApplySettings(void)
@@ -127,11 +140,15 @@ static void Layout(HWND hwnd)
     int y2 = y + btnH + pad;
     if (g_app.hTab)
         MoveWindow(g_app.hTab, pad, y2, AppScale(320), btnH, TRUE);
+    if (g_hChkTree)
+        MoveWindow(g_hChkTree, pad + AppScale(328), y2, AppScale(56), btnH, TRUE);
+    if (g_hBtnAiLog)
+        MoveWindow(g_hBtnAiLog, pad + AppScale(392), y2, AppScale(120), btnH, TRUE);
     if (g_app.hEditFilter) {
         int fw = AppScale(280);
         int fx = rc.right - pad - fw;
-        if (fx < pad + AppScale(320) + pad)
-            fx = pad + AppScale(320) + pad; /* 窗口过窄时退化为紧贴页签 */
+        if (fx < pad + AppScale(520) + pad)
+            fx = pad + AppScale(520) + pad;
         MoveWindow(g_app.hEditFilter, fx, y2, fw, btnH, TRUE);
     }
 
@@ -173,15 +190,24 @@ static void CreateControls(HWND hwnd)
                                  0, 0, AppScale(320), AppScale(30),
                                  hwnd, (HMENU)(INT_PTR)IDC_TAB, g_app.hInst, NULL);
     {
-        static const WCHAR *kTabs[3] = { L"全部进程", L"Node/Python", L"端口占用" };
+        static const WCHAR *kTabs[4] = { L"全部进程", L"Node/Python", L"端口占用", L"日志" };
         TCITEMW ti;
         ZeroMemory(&ti, sizeof(ti));
         ti.mask = TCIF_TEXT;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             ti.pszText = (LPWSTR)kTabs[i];
             TabCtrl_InsertItem(g_app.hTab, i, &ti);
         }
     }
+
+    g_hChkTree = CreateWindowExW(0, L"BUTTON", L"树形",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                                 0, 0, AppScale(56), AppScale(30),
+                                 hwnd, (HMENU)(INT_PTR)IDC_CHK_TREE, g_app.hInst, NULL);
+    SendMessageW(g_hChkTree, BM_SETCHECK,
+                 ConfigGetBool(L"TreeView", FALSE) ? BST_CHECKED : BST_UNCHECKED, 0);
+    g_app.treeMode = ConfigGetBool(L"TreeView", FALSE);
+    g_app.collapsedCount = 0;
 
     g_app.hEditFilter = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", NULL,
                                         WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
@@ -211,6 +237,14 @@ static void CreateControls(HWND hwnd)
     g_app.hStatus = CreateWindowExW(0, STATUSCLASSNAME, NULL,
                                     WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP,
                                     0, 0, 0, 0, hwnd, (HMENU)(INT_PTR)7, g_app.hInst, NULL);
+
+    /* WP2: 日志复盘按钮（默认隐藏，切到日志页签时显示） */
+    g_hBtnAiLog = CreateWindowExW(0, L"BUTTON", L"AI 复盘日志",
+                                  WS_CHILD | WS_TABSTOP | BS_PUSHBUTTON,
+                                  0, 0, AppScale(120), AppScale(30),
+                                  hwnd, (HMENU)(INT_PTR)IDC_BTN_AI_LOG, g_app.hInst, NULL);
+    if (g_app.hFont)
+        SendMessageW(g_hBtnAiLog, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
 }
 
 /* ---------------- 消息处理 ---------------- */
@@ -268,6 +302,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             SendMessageW(g_app.hChkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED &&
             IsWindowVisible(hwnd)) /* 隐藏驻留时跳过，恢复显示时再刷新 */
             ViewsRescan();
+        else if (wp == TIMER_ORPHAN)
+            ActionsCleanOrphans(TRUE); /* 定时静默清理孤儿进程 */
         return 0;
 
     case WM_APP_TRAY:
@@ -287,10 +323,28 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         LRESULT themeRes = 0;
         if (ThemeOnHeaderNotify(hdr, &themeRes))
             return themeRes; /* 深色表头绘制 */
-        if (hdr && hdr->idFrom == IDC_TAB && hdr->code == TCN_SELCHANGE)
+        if (hdr && hdr->idFrom == IDC_TAB && hdr->code == TCN_SELCHANGE) {
             ViewsApplyMode(TRUE);
+            /* WP2: 日志复盘按钮仅日志页签可见 */
+            if (g_hBtnAiLog) {
+                int mode = (int)TabCtrl_GetCurSel(g_app.hTab);
+                ShowWindow(g_hBtnAiLog, mode == MODE_LOG ? SW_SHOW : SW_HIDE);
+            }
+        }
         else if (hdr && hdr->idFrom == IDC_LIST && hdr->code == LVN_COLUMNCLICK)
             ViewsSortBy(((LPNMLISTVIEW)lp)->iSubItem);
+        else if (hdr && hdr->idFrom == IDC_LIST && hdr->code == NM_DBLCLK) {
+            /* 树形模式：双击行折叠/展开其子树 */
+            NMITEMACTIVATE *nm = (NMITEMACTIVATE *)lp;
+            if (nm && nm->iItem >= 0) {
+                LVITEMW it;
+                ZeroMemory(&it, sizeof(it));
+                it.mask = LVIF_PARAM;
+                it.iItem = nm->iItem;
+                if (ListView_GetItem(g_app.hList, &it))
+                    ViewsToggleCollapse((DWORD)it.lParam);
+            }
+        }
         break; /* 其余通知交给 DefWindowProc，不能吞掉返回值 */
     }
 
@@ -343,6 +397,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_LIST_AI_ANALYZE:
             ActionsAiMenuCommand(hwnd);
             break;
+        case IDM_LIST_OPEN_URL:
+            OpenRowUrl(hwnd, FALSE);
+            break;
+        case IDM_LIST_COPY_URL:
+            OpenRowUrl(hwnd, TRUE);
+            break;
+        case IDM_LIST_SHOW_IN_EXPLORER:
+            ShowRowInExplorer(ActionsGetContextRow());
+            break;
+        case IDM_LIST_COPY_CMD:
+            CopyRowCmdline(hwnd, ActionsGetContextRow());
+            break;
+        case IDM_LIST_OPEN_IN_TERMINAL:
+            OpenRowTerminal(ActionsGetContextRow());
+            break;
         case IDC_EDIT_FILTER:
             if (HIWORD(wp) == EN_CHANGE)
                 ViewsRebuild(); /* 输入即筛选：只重绘，不重扫 */
@@ -350,6 +419,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CHK_AUTO: /* UI 开关与配置双向同步 */
             ConfigSetBool(L"AutoRefresh",
                           SendMessageW(g_app.hChkAuto, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            break;
+        case IDC_CHK_TREE: /* 树形分组开关（仅全部进程视图生效，持久化） */
+            g_app.treeMode = SendMessageW(g_hChkTree, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            ConfigSetBool(L"TreeView", g_app.treeMode);
+            if (g_app.mode == MODE_ALL) {
+                g_app.sortCol = -1;
+                g_app.collapsedCount = 0;
+                ViewsSetColumns();
+                ViewsRebuild();
+            }
             break;
         case IDC_BTN_KILL_NODE:
         case IDM_TRAY_KILL_NODE:
@@ -364,6 +443,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDM_TRAY_SETTINGS:
             SettingsShow();
+            break;
+        case IDC_BTN_AI_LOG:
+            ActionsAiLogReview(hwnd);
+            break;
+        case IDM_TRAY_ORPHAN:
+            ActionsCleanOrphans(FALSE);
             break;
         case IDM_TRAY_AUTOSTART: {
             BOOL ok = StartupIsEnabled() ? StartupDisable() : StartupEnable();
