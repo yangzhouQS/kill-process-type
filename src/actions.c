@@ -2619,6 +2619,9 @@ static void ChatLayout(HWND parent)
         int pw = 360;
         GetClientRect(parent, &rc);
         MoveWindow(s_chatPanel, rc.right - pw, 0, pw, rc.bottom, TRUE);
+        /* 确保始终在所有兄弟控件之上（列表/按钮/页签等） */
+        SetWindowPos(s_chatPanel, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         {
             RECT prc;
             GetClientRect(s_chatPanel, &prc);
@@ -2635,6 +2638,9 @@ static LRESULT CALLBACK ChatProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case WM_SIZE:
         ChatLayout(GetParent(hwnd));
+        /* 主窗口 Layout 可能盖住面板，再次置顶 */
+        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         return 0;
     case WM_ERASEBKGND:
         if (ThemeOnEraseBkgnd(hwnd, (HDC)wp))
@@ -2721,6 +2727,12 @@ void ChatPanelToggle(HWND mainHwnd)
     } else {
         s_chatVisible = !s_chatVisible;
         ShowWindow(s_chatPanel, s_chatVisible ? SW_SHOW : SW_HIDE);
+        if (s_chatVisible) {
+            /* 展开时确保置顶 */
+            SetWindowPos(s_chatPanel, HWND_TOP, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            ChatLayout(mainHwnd);
+        }
     }
 }
 
